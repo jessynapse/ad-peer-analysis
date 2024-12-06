@@ -1,0 +1,2887 @@
+---
+title: "Spring 2024 Rotation Project"
+author: "Jessica Wong"
+
+output:
+  html_document:
+    theme: cosmo
+    toc: true
+    toc_float: true
+    fig_width: 8
+    fig_height: 6
+    code_folding: show
+editor: 
+  name: visual
+  options:
+    chunk_output_type: inline
+execute: 
+  warnings: false
+  messages: false
+---
+
+------------------------------------------------------------------------
+
+## Data Cleaning {#sec-cleaning}
+
+```{r}
+library(haven)
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+library(combinat)
+library(gtsummary)
+library(lme4)
+library(MASS)
+library(lmerTest)
+library(VIM)
+library(ggalluvial)
+library(RColorBrewer)
+library(mice)
+library(broom)
+library(tibble)
+library(geepack)
+library(nnet)
+library(showtext)
+ADPEERDATA <- read_dta("/Users/wongjj/Downloads/PEERdata.dta")
+```
+
+I am extracting a subset of columns from the `ADPEERDATA` dataframe. I am filtering rows where the value in the `VNUM` column is equal to 1 to isolate only records from the enrollment visit. I perform data transformation tasks, create a new variable called `BASELINEPERSISTENCE`, where non-persistent AD is classified if complete control and no medication use, and persistent otherwise.
+
+```{r}
+ADPEERDATA <- ADPEERDATA %>%
+  mutate(STEROID = ifelse(STEROID == 88, 0, STEROID))
+BASELINE <- ADPEERDATA[c("PID", "VNUM", "ENR17","ENR11J", "ENR17A1", "ENR17A2", "ENR17A3", "ENR17A4", "ENR17A5", "ENR17A6", "ENR17A7", "ENR17A8", "ENR17A9", "ENR17A98", "ENR14", "ENR12", "ENR15", "SEX", "WHITE", "HISPANIC", "ASIAN", "BLACK", "NATIVE", "ENR20E", "ENR21C", "ENR22C", "ENR23", "ENR24", "enrage", "CONTROL", "CREAM", "ELIDEL", "PROT", "STEROID", "OTHERX")]
+
+BASELINE <- BASELINE[BASELINE$VNUM == 1, ]
+BASELINE$HISPANIC <- ifelse(BASELINE$HISPANIC == 2, 0, BASELINE$HISPANIC)
+BASELINE$`BASELINEPERSISTENCE` <- ifelse(BASELINE$CONTROL == 1 & 
+                                      BASELINE$CREAM == 0 & 
+                                      BASELINE$ELIDEL == 0 & 
+                                      BASELINE$PROT == 0 & 
+                                      BASELINE$STEROID == 0 & 
+                                      BASELINE$OTHERX == 0, 
+                                   0, 1)
+variable_rename <- c(
+  "ENR17" = "FA", "ENR11J" = "FA_RELATED_ITCH", "ENR17A1" = "Rice", "ENR17A2" = "Peanuts", "ENR17A3" = "Milk", 
+  "ENR17A4" = "Tree Nuts", "ENR17A5" = "Soy", "ENR17A6" = "Fish", "ENR17A7" = "Egg", 
+  "ENR17A8" = "Shellfish", "ENR17A9" = "Wheat", "ENR17A98" = "Other", "PID" = "PID", 
+  "VNUM" = "VNUM", "SEX" = "Sex", "WHITE" = "White", "HISPANIC" = "Hispanic", "ASIAN" = "Asian", 
+  "BLACK" = "Black", "NATIVE" = "AI/AN", "ENR20E" = "MOMAD", "ENR21C" = "DADAD", 
+  "ENR22C" = "SIBAD", "ENR23" = "SMOKING", "ENR24" = "INCOME", 
+  "enrage" = "ENRAGE", "CONTROL" = "BASELINECONTROL", "CREAM" = "RXCREAM.6M", 
+  "ELIDEL" = "ELIDEL.6M", "PROT" = "PROTOPIC.6M", 
+  "STEROID" = "TOPICALSTEROIDS.6M", "OTHERX" = "OTHERADRX.6M", 
+  "BASELINEPERSISTENCE" = "BASELINEPERSISTENCE",
+  "ENR14" = "SEASONALALLERGIES", "ENR15" = "ANIMALALLERGIES", "ENR12" = "ASTHMA"
+)
+names(BASELINE) <- variable_rename[names(BASELINE)]
+
+BASELINE$`FAMILYAD` <- ifelse(
+  is.na(BASELINE$`MOMAD`) &
+  is.na(BASELINE$`DADAD`) &
+  is.na(BASELINE$`SIBAD`), NA, 
+  ifelse(BASELINE$`MOMAD` == 1 |
+         BASELINE$`DADAD` == 1 |
+         BASELINE$`SIBAD` == 1, 1, 0))
+
+BASELINE$N_OTHER_COMORBIDITIES <- ifelse(
+  (BASELINE$SEASONALALLERGIES == 1 & BASELINE$ANIMALALLERGIES == 0 & BASELINE$ASTHMA == 0) |
+  (BASELINE$SEASONALALLERGIES == 0 & BASELINE$ANIMALALLERGIES == 1 & BASELINE$ASTHMA == 0) |
+  (BASELINE$SEASONALALLERGIES == 0 & BASELINE$ANIMALALLERGIES == 0 & BASELINE$ASTHMA == 1), 1,
+  ifelse((BASELINE$SEASONALALLERGIES == 1 & BASELINE$ANIMALALLERGIES == 1 & BASELINE$ASTHMA == 0) |
+         (BASELINE$SEASONALALLERGIES == 1 & BASELINE$ANIMALALLERGIES == 0 & BASELINE$ASTHMA == 1) |
+         (BASELINE$SEASONALALLERGIES == 0 & BASELINE$ANIMALALLERGIES == 1 & BASELINE$ASTHMA == 1), 2,
+         ifelse(BASELINE$SEASONALALLERGIES == 1 & BASELINE$ANIMALALLERGIES == 1 & BASELINE$ASTHMA == 1, 3,
+         ifelse(BASELINE$SEASONALALLERGIES == 0 & BASELINE$ANIMALALLERGIES == 0 & BASELINE$ASTHMA == 0, 0, NA))))
+BASELINE$CONTROL_DJM <- ifelse(BASELINE$BASELINECONTROL %in% c(1, 2), "Controlled",
+                               ifelse(BASELINE$BASELINECONTROL %in% c(3, 4), "Uncontrolled", NA))
+
+BASELINE <- BASELINE %>%
+  mutate(Race = case_when(
+    White == 1 ~ 1,
+    Black == 1 ~ 2,
+    Hispanic == 1 | Asian == 1 | `AI/AN` == 1 ~ 3,
+    TRUE ~ NA_integer_
+  ))
+
+# Calculate the sum of FA presence for each row
+BASELINE$"SUMFA" <- rowSums(BASELINE[, c("Rice", "Peanuts", "Milk", 'Tree Nuts', 'Soy', 'Fish', 'Egg', 'Shellfish', 'Wheat', 'Other')])
+BASELINE$FA_SENSITIVITY <- ifelse(BASELINE$FA == 1 & BASELINE$FA_RELATED_ITCH == 1, 1, 0)
+
+
+```
+
+```{r}
+missing_count_per_column <- colSums(is.na(BASELINE), na.rm = TRUE)
+rows_with_missing_values <- BASELINE[rowSums(is.na(BASELINE)) > 0, ]
+
+# Fill missing values in "FA" with 0 when the sum of FA presence is 0
+BASELINE$"FA"[is.na(BASELINE$"FA") & BASELINE$"SUMFA" == 0] <- 0
+post_rows_with_missing_values <- BASELINE[rowSums(is.na(BASELINE)) > 0, ]
+
+# Filter the dataset where "FA" is 0 and "Sum of FA" is not 0
+filtered_rows_1 <- BASELINE %>%
+  filter(`FA` == 0, SUMFA != 0)
+BASELINE <- BASELINE %>%
+  mutate(
+    Other = ifelse(`FA` == 0 & Other == 1, 0, Other),
+    SUMFA = ifelse(`FA` == 0, 0, SUMFA)
+  )
+BASELINE <- BASELINE %>%
+  mutate(`FA` = ifelse(
+    Rice == 1 | Peanuts == 1 | Milk == 1 | `Tree Nuts` == 1 | Soy == 1 | Fish == 1 | Egg == 1 | Shellfish == 1 | Wheat == 1,
+    1, `FA`
+  ))
+filtered_rows_2 <- BASELINE %>%
+  filter(`FA` == 1, SUMFA == 0)
+
+BASELINE <- BASELINE %>%
+  mutate(
+    Other = ifelse(`FA` == 1 & SUMFA == 0, 1, Other),
+    SUMFA = ifelse(`FA` == 1 & SUMFA == 0, 1, SUMFA)
+  )
+```
+
+------------------------------------------------------------------------
+
+## Descriptive Analyses {#sec-descriptive}
+
+First, I count the occurrences of each category of "FA" and calculate the percentage of each category relative to the total count. I then filter out any missing values and rename the columns for clarity. I created a bar plot to visualize the distribution of food allergy categories in the dataset.
+
+```{r}
+countFA_df <- BASELINE %>%
+  count(FA) %>%
+  mutate(Percentage = (n / sum(n)) * 100) %>%
+  filter(!is.na(FA)) %>%
+  rename(FA = `FA`, Count = n)
+
+ggplot(data = countFA_df, aes(x = factor(FA), y = Percentage, fill = factor(FA))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = paste0(round(Percentage, 2), "%")),
+            position = position_dodge(width = 0.9),
+            vjust = -0.5,
+            size = 3.5,
+            color = "black") +
+  labs(y = "Percentage", x = "") +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    text = element_text(size = 14),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 14),
+    axis.title.y = element_text(size = 14)
+  ) +
+  scale_x_discrete(labels = c("No Known Allergies", "Known Allergies")) +
+  labs(title = "Fig 1. Percentage Distribution of Food Allergy Status (n = 8,015)")
+```
+
+
+```{r}
+countFA_df <- BASELINE %>%
+  count(FA_RELATED_ITCH) %>%
+  mutate(Percentage = (n / sum(n)) * 100) %>%
+  filter(!is.na(FA_RELATED_ITCH)) %>%
+  rename(FA_RELATED_ITCH = FA_RELATED_ITCH, Count = n)
+
+ggplot(data = countFA_df, aes(x = factor(FA_RELATED_ITCH), y = Percentage, fill = factor(FA_RELATED_ITCH))) +
+  geom_bar(stat = "identity", position = "dodge") +
+  geom_text(aes(label = paste0(round(Percentage, 2), "%")), 
+            position = position_dodge(width = 0.9), 
+            vjust = -0.5, 
+            size = 3.5, 
+            color = "black") +
+  labs(y = "Percentage", x = "") +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    text = element_text(size = 14),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    plot.title = element_text(size = 14, face = "bold"),
+    plot.subtitle = element_text(size = 14),
+    axis.title.y = element_text(size = 14)
+  ) +
+  scale_x_discrete(labels = c("No Known Allergies", "Known Allergies")) +
+  labs(title = "Fig. 2. Misclassification Analysis: Distribution of Food Allergy Status")
+```
+
+```{r}
+countFA_df <- BASELINE %>%
+  count(FA) %>%
+  mutate(Percentage = (n / sum(n)) * 100) %>%
+  filter(!is.na(FA)) %>%
+  rename(Status = FA, Count = n) %>%
+  mutate(`Analysis Type` = "Primary Analysis")
+
+
+countItch_df <- BASELINE %>%
+  count(FA_RELATED_ITCH) %>%
+  mutate(Percentage = (n / sum(n)) * 100) %>%
+  filter(!is.na(FA_RELATED_ITCH)) %>%
+  rename(Status = FA_RELATED_ITCH, Count = n) %>%
+  mutate(`Analysis Type` = "Sensitivity Analysis")
+
+stacked <- rbind(countFA_df, countItch_df) %>%
+  mutate(Status = ifelse(Status == 0, "No Known Allergies", "Known Allergies"))
+
+
+# Load Google Fonts
+font_add_google("Fredoka One", "fredoka")
+showtext_auto()
+
+# Define colors
+colors <- c("#FFC107", "#FF9800")
+
+# Create the stacked bar chart
+ggplot(stacked, aes(x = `Analysis Type`, y = Percentage, fill = Status)) +
+  geom_bar(stat = "identity", position = "fill") +
+  scale_fill_manual(values = colors) +
+  geom_text(aes(label = sprintf("%.1f%%", Percentage), group = Status),
+            position = position_fill(vjust = 0.5),
+            size = 5, family = "fredoka", fontface = "bold",
+            color = "black") +
+  labs(title = "Comparison of Food Allergy Status",
+       subtitle = "Primary vs. Sensitivity Analysis") +
+  theme_minimal(base_family = "fredoka") +
+  theme(
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    text = element_text(size = 14, family = "fredoka"),
+    axis.text.x = element_text(angle = 360, hjust = 0.5, size = 12, family = "fredoka"),
+    axis.text.y = element_blank(), # Remove y-axis text
+    axis.ticks.y = element_blank(), # Remove y-axis ticks
+    axis.title.x = element_blank(), # Remove x-axis title
+    axis.title.y = element_blank(), # Remove y-axis title
+    plot.title = element_text(size = 24, face = "bold", hjust = 0.5, family = "fredoka", color = "#FFC107"),
+    plot.subtitle = element_text(size = 18, hjust = 0.5, family = "fredoka"),
+    panel.grid.major.x = element_line(color = "gray80", linetype = "dashed"),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "#F5F5F5", color = NA)
+  ) +
+  guides(fill = guide_legend(reverse = TRUE))
+```
+
+I am showcasing the prevalence of specific food allergies within our dataset. The table presents percentages representing the proportion of individuals affected by each of the ten specific food allergies. This analysis aids in identifying the most common allergies among individuals within our dataset, offering valuable insights into the distribution and prevalence of different food allergies.
+
+```{r}
+specific_FA_df <- BASELINE %>%
+  pivot_longer(cols = c(Rice, Peanuts, Milk, `Tree Nuts`, Soy, Fish, Egg, Shellfish, Wheat, Other),
+               names_to = "Food",
+               values_to = "Value") %>%
+  group_by(Food) %>%
+  summarise(Allergy = sum(Value == 1, na.rm = TRUE),
+            `% with Allergies` = scales::percent(mean(Value == 1, na.rm = TRUE), accuracy = 0.01)) %>%
+  arrange(desc(`% with Allergies`))
+specific_FA_df <- specific_FA_df %>%
+  mutate(`% with Allergies (No Sign)` = as.numeric(sub("%", "", `% with Allergies`)))
+
+specific_FA_df
+```
+
+The bar plot represents the prevalence of specific food allergies in ascending order.
+
+```{r}
+
+ggplot(specific_FA_df, aes(x = Food, y = `% with Allergies (No Sign)`, fill = Food)) +
+  geom_segment(aes(xend = Food, yend = 0), color = "gray50", size = 1) +
+  geom_point(aes(color = `% with Allergies (No Sign)`), size = 6, shape = 21, stroke = 1.5) +
+  scale_color_gradient(low = "tan2", high = "brown4") +
+  coord_flip() +
+  labs(x = "Food Allergen", y = "Percentage with Allergies", title = "Fig. 3. Prevalence of Specific Food Allergies") +
+  theme_minimal() +
+  theme(
+    panel.grid.major.y = element_blank(),
+    axis.text.x = element_text(hjust = 1, vjust = 1),
+    plot.title = element_text(hjust = 0.5, face = "bold"),
+    panel.background = element_rect(fill = "white"),
+    axis.title.y = element_text(margin = margin(r = 20), face = "bold"),
+    legend.position = "none"
+  )
+```
+
+I am looking at the distribution of single and multiple food allergies among individuals in the dataset. The `multiple_allergies_df` dataframe filters cases where the number of reported food allergies falls between 1 and 10. Counts and percentages of occurrences for each number of allergies are calculated. The resulting bar plot visualizes these counts, with bars representing the frequency of each number of allergies.
+
+```{r}
+multiple_allergies_df <- BASELINE %>%
+  filter(`FA` == 1) %>%
+  count(`SUMFA`) %>%
+  rename(`Number of Allergies` = `SUMFA`, Count = n) %>%
+  mutate(`Number of Allergies` = as.numeric(`Number of Allergies`), Count = as.numeric(Count)) %>%
+  mutate(Percentage = (Count / sum(Count)) * 100)
+
+plot <- ggplot(multiple_allergies_df, aes(x = "", y = Percentage, fill = factor(`Number of Allergies`))) +
+  geom_bar(width = 1, stat = "identity", color = "white") +
+  coord_polar("y", start = 0) +
+  labs(title = "Distribution of Single/Multiple Allergies Among FA Cases") +  # Updated title
+  theme_void() +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5)) +
+  scale_fill_brewer(palette = "Set3", name = "# Food Allergies") +
+  geom_text(aes(label = ifelse(`Number of Allergies` <= 6, paste0(round(Percentage), "%"), "")), 
+            position = position_stack(vjust = 0.5), size = 8, color = "black") +
+  theme(legend.title = element_blank(),
+            legend.position = "bottom",
+            legend.text = element_text(size = 24),)
+
+plot
+
+
+```
+```{r}
+
+# Create a dataframe for the data
+data <- data.frame(
+  `NUMALLERGIES` = c("No Food Allergies", "Known Food Allergies"),
+  "Percentage" = c(77.3, 22.7)
+)
+
+# Plotting
+plot <- ggplot(data, aes(x = "", y = Percentage, fill = factor(NUMALLERGIES))) +
+  geom_bar(width = 1, stat = "identity", color = "white") +
+  coord_polar("y", start = 0) +
+  labs(title = "Distribution of Food Allergies") +
+  theme_void() +
+  theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5)) +
+  scale_fill_brewer(palette = "Set2", name = "# Food Allergies") +
+  geom_text(aes(label = paste0(round(Percentage), "%")), 
+            position = position_stack(vjust = 0.5), size = 4, color = "black") +
+  theme(legend.title = element_blank(),
+            legend.position = "bottom")
+
+plot
+
+
+```
+
+I am getting all the combinations of different food allergens in the dataset and identifying the most common combinations containing 2, 3, and 4 allergens. My code iterates over all possible combinations of allergens from 2 to 10 and calculates the frequency of each combination. The top combinations for each group (2, 3, and 4 allergens) are then selected and plotted in a bar chart. The bar plot visualizes the frequency of each combination, with the count of occurrences displayed on top of each bar. The combinations are colored based on the number of allergens they contain.
+
+```{r}
+items <- c("Rice", "Peanuts", "Milk", 'Tree Nuts', 'Soy', 'Fish', 'Egg', 'Shellfish', 'Wheat', 'Other')
+results_df <- data.frame(Combination = character(), Count = integer(), Sum_FA = character(), stringsAsFactors = FALSE)
+
+for (num_items in 2:10) {
+  combinations <- combinat::combn(items, num_items, simplify = FALSE)
+  for (i in 1:length(combinations)) {
+    current_combination <- combinations[[i]]
+    count <- sum(rowSums(BASELINE[current_combination] == 1, na.rm = TRUE) == num_items)
+    Sum_FA <- as.character(num_items)
+    
+    results_df <- bind_rows(results_df, data.frame(Combination = paste(current_combination, collapse = " & "), 
+                                                   Count = count, 
+                                                   Sum_FA = Sum_FA))
+  }
+}
+results_df <- results_df[order(-results_df$Count), ]
+
+top_combinations <- results_df %>%
+  group_by(`Sum_FA`) %>%
+  top_n(3, Count)
+print(top_combinations)
+
+filtered_top_combinations <- top_combinations %>%
+  filter(Sum_FA %in% c("2", "3", "4")) %>%
+  arrange(desc(Count))
+
+# Create a factor variable for Combination with proper ordering
+filtered_top_combinations$Combination <- factor(filtered_top_combinations$Combination, levels = unique(filtered_top_combinations$Combination))
+
+# Sort the combinations based on their counts
+filtered_top_combinations <- filtered_top_combinations %>%
+  arrange(desc(Count))
+
+# Reverse the order of combinations
+filtered_top_combinations <- filtered_top_combinations %>% 
+  mutate(Combination = factor(Combination, levels = rev(levels(Combination))))
+
+# Create a lollipop chart
+ggplot(filtered_top_combinations, aes(x = Combination, y = Count, color = as.factor(Sum_FA))) +
+  geom_segment(aes(xend = Combination, yend = 0), size = 1) +  # Vertical lines
+  geom_point(size = 4, stroke = 2) +  # Lollipop heads
+  geom_text(aes(label = Count), hjust = -0.3, vjust = 0.5, size = 4) +  # Count labels
+  scale_color_manual(values = c("2" = "dodgerblue", "3" = "forestgreen", "4" = "firebrick"),
+                     labels = c("2" = "2 Allergens", "3" = "3 Allergens", "4" = "4 Allergens")) +
+  coord_flip() +  # Flip the coordinates
+  labs(x = "Frequency", y = NULL, title = "Fig. 4B. Most Common Allergen Combinations") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(size = 24, face = "bold"),
+    axis.title.x = element_text(size = 12, face = "bold"),
+    axis.text.y = element_text(size = 14),
+    legend.position = "bottom",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 14),
+    panel.grid.major.y = element_line(color = "lightgray", size = 0.2),
+    panel.grid.minor = element_blank(),
+    panel.border = element_blank(),
+    panel.background = element_blank(),
+    plot.margin = margin(15, 10, 15, 50)
+  )
+```
+
+In this analysis, I filtered the baseline dataset to focus solely on individuals with food allergies (`FA = 1`). This allowed me to explore the prevalence of various atopic comorbidities among this specific group. From the filtered data, I then calculated the counts for different combinations of other ATOPIC.COMORBIDITIES, such as seasonal allergies, animal allergies, and asthma, as well as their respective percentages relative to the total count of individuals with food allergies. This tibble provides an overview of how seasonal allergies, animal allergies, and asthma manifest among individuals with food allergies.
+
+```{r}
+filtered_data <- BASELINE %>%
+  filter(`FA` == 1)
+
+total_count <- 1822
+
+count_all_three <- nrow(filtered_data %>%
+                          filter(`SEASONALALLERGIES` == 1 &
+                                 `ANIMALALLERGIES` == 1 &
+                                 `ASTHMA` == 1))
+
+count_seasonal_animal <- nrow(filtered_data %>%
+                                filter(`SEASONALALLERGIES` == 1 &
+                                       `ANIMALALLERGIES` == 1 &
+                                       `ASTHMA` == 0))
+
+count_seasonal_asthma <- nrow(filtered_data %>%
+                                 filter(`SEASONALALLERGIES` == 1 &
+                                        `ANIMALALLERGIES` == 0 &
+                                        `ASTHMA` == 1))
+
+count_animal_asthma <- nrow(filtered_data %>%
+                               filter(`SEASONALALLERGIES` == 0 &
+                                      `ANIMALALLERGIES` == 1 &
+                                      `ASTHMA` == 1))
+
+count_only_seasonal <- nrow(filtered_data %>%
+                              filter(`SEASONALALLERGIES` == 1 &
+                                     `ANIMALALLERGIES` == 0 &
+                                     `ASTHMA` == 0))
+
+count_only_animal <- nrow(filtered_data %>%
+                             filter(`SEASONALALLERGIES` == 0 &
+                                    `ANIMALALLERGIES` == 1 &
+                                    `ASTHMA` == 0))
+
+count_only_asthma <- nrow(filtered_data %>%
+                             filter(`SEASONALALLERGIES` == 0 &
+                                    `ANIMALALLERGIES` == 0 &
+                                    `ASTHMA` == 1))
+
+count_no_conditions <- total_count - (count_all_three + count_seasonal_animal + count_seasonal_asthma +
+                                      count_animal_asthma + count_only_seasonal + count_only_animal + count_only_asthma)
+
+percentage_all_three <- (count_all_three / total_count) * 100
+percentage_seasonal_animal <- (count_seasonal_animal / total_count) * 100
+percentage_seasonal_asthma <- (count_seasonal_asthma / total_count) * 100
+percentage_animal_asthma <- (count_animal_asthma / total_count) * 100
+percentage_only_seasonal <- (count_only_seasonal / total_count) * 100
+percentage_only_animal <- (count_only_animal / total_count) * 100
+percentage_only_asthma <- (count_only_asthma / total_count) * 100
+percentage_no_conditions <- (count_no_conditions / total_count) * 100
+
+result_tibble <- tibble(
+  "Combination" = c("Only Asthma",
+                    "Only Animal Allergies",
+                    "Only Seasonal Allergies",
+                    "Animal Allergies and Asthma",
+                    "Seasonal Allergies and Asthma",
+                    "Seasonal Allergies and Animal Allergies",
+                    "Seasonal Allergies, Animal Allergies, and Asthma",
+                    "No Presence of Atopic Comorbidities"),
+  "Count" = c(count_only_asthma, count_only_animal, count_only_seasonal, count_animal_asthma,
+              count_seasonal_asthma, count_seasonal_animal, count_all_three, count_no_conditions),
+  "Percentage" = c(percentage_only_asthma, percentage_only_animal, percentage_only_seasonal,
+                   percentage_animal_asthma, percentage_seasonal_asthma, percentage_seasonal_animal,
+                   percentage_all_three, percentage_no_conditions)
+)
+
+result_tibble <- result_tibble[order(result_tibble$Percentage), ]
+print(result_tibble)
+```
+
+This horizontal bar plot illustrates the distribution of other atopic comorbidities among individuals solely diagnosed with food allergies. The plot provides insight into the prevalence of specific combinations of allergies and asthma among those with food allergies.
+
+
+------------------------------------------------------------------------
+
+## Table 1. Participant Characteristics at Enrollment Visit {#sec-table1}
+
+```{r}
+CATEGORIZED_BASELINE <- BASELINE
+
+# Renaming columns in CATEGORIZED_BASELINE
+name_changes <- c("ENRAGE" = "Enrollment Age",
+                  "SMOKING" = "Smoking",
+                  "INCOME" = "Income",
+                  "BASELINECONTROL" = "AD Control at Baseline",
+                  "FAMILYAD" = "Family History of AD",
+                  "BASELINEPERSISTENCE" = "AD Persistence at Baseline",
+                  "RXCREAM.6M" = "Use of RX AD Cream in Past 6M",
+                  "ELIDEL.6M" = "Use of Elidel in Past 6M",
+                  "PROTOPIC.6M" = "Use of Protopic in Past 6M",
+                  "TOPICALSTEROIDS.6M" = "Use of Topical Steroids in Past 6M",
+                  "OTHERADRX.6M" = "Use of Other AD RX in Past 6M",
+                  "ASTHMA" = "Asthma",
+                  "ANIMALALLERGIES" = "Animal Allergies",
+                  "SEASONALALLERGIES" = "Seasonal Allergies",
+                  "FA" = "Food Allergy",
+                  "N_OTHER_COMORBIDITIES" = "Number of Other Atopic Comorbidities",
+                  "FA_SENSITIVITY" = "Food Allergy (Sensitivity Analysis)",
+                  "FA_RELATED_ITCH" = "Food/Drink-Related Itch",
+                  "CONTROL_DJM" = "DJM AD Control at Baseline")
+
+for (old_name in names(name_changes)) {
+  new_name <- name_changes[old_name]
+  names(CATEGORIZED_BASELINE)[names(CATEGORIZED_BASELINE) == old_name] <- new_name
+}
+
+covariates <- c(
+  "Enrollment Age", "Smoking", "Income", "AD Control at Baseline", 
+  "Family History of AD", "AD Persistence at Baseline", 
+  "Use of RX AD Cream in Past 6M", "Use of Elidel in Past 6M", 
+  "Use of Protopic in Past 6M", "Use of Topical Steroids in Past 6M", 
+  "Use of Other AD RX in Past 6M", "Asthma", "Animal Allergies", 
+  "Seasonal Allergies", "Number of Other Atopic Comorbidities", "Food Allergy (Sensitivity Analysis)", "Food/Drink-Related Itch", "DJM AD Control at Baseline"
+)
+
+# Transforming categorical variables
+CATEGORIZED_BASELINE <- CATEGORIZED_BASELINE %>%
+  mutate(
+    Sex = case_when(
+      Sex == 1 ~ "Boy",
+      Sex == 2 ~ "Girl",
+      TRUE ~ NA_character_
+    ),
+    Smoking = case_when(
+      Smoking == 1 ~ "Yes",
+      Smoking == 0 ~ "No",
+      TRUE ~ NA_character_
+    ),
+    Asthma = case_when(
+      Asthma == 0 ~ "No",
+      Asthma == 1 ~ "Yes",
+      TRUE ~ NA_character_
+    ),
+    `Animal Allergies` = case_when(
+      `Animal Allergies` == 0 ~ "No",
+      `Animal Allergies` == 1 ~ "Yes",
+      TRUE ~ NA_character_
+    ),
+    `Seasonal Allergies` = case_when(
+      `Seasonal Allergies` == 0 ~ "No",
+      `Seasonal Allergies` == 1 ~ "Yes",
+      TRUE ~ NA_character_
+    ),
+    `AD Control at Baseline` = case_when(
+      `AD Control at Baseline` == 1 ~ "Complete",
+      `AD Control at Baseline` == 2 ~ "Good",
+      `AD Control at Baseline` == 3 ~ "Limited",
+      `AD Control at Baseline` == 4 ~ "Uncontrolled",
+      TRUE ~ NA_character_
+    ),
+    `Family History of AD` = case_when(
+      `Family History of AD` == 0 ~ "No",
+      `Family History of AD` == 1 ~ "Yes",
+      TRUE ~ NA_character_
+    ),
+    `AD Persistence at Baseline` = case_when(
+      `AD Persistence at Baseline` == 1 ~ "Yes",
+      `AD Persistence at Baseline` == 0 ~ "No",
+      TRUE ~ NA_character_
+    ),
+    `Food Allergy` = case_when(
+      `Food Allergy` == 1 ~ "Food Allergy",
+      `Food Allergy` == 0 ~ "No Food Allergy",
+      TRUE ~ NA_character_
+    ),
+    `Food Allergy (Sensitivity Analysis)` = case_when(
+      `Food Allergy (Sensitivity Analysis)` == 1 ~ "Food Allergy (Sensitivity Analysis)",
+      `Food Allergy (Sensitivity Analysis)` == 0 ~ "No Food Allergy (Sensitivity Analysis)",
+      TRUE ~ NA_character_
+    ),
+    Income = case_when(
+      Income %in% c(4, 5) ~ ">$75,000",
+      Income == 1 ~ "<$24,000",
+      Income == 2 ~ "$25,000-$49,999",
+      Income == 3 ~ "$50,000-$74,999",
+      TRUE ~ NA_character_
+    ),
+    Race = case_when(
+      Race == 1 ~ "White",
+      Race == 2 ~ "Black",
+      Race == 3 ~ "Other",
+      TRUE ~ NA_character_
+    )
+  )
+
+CATEGORIZED_BASELINE <- CATEGORIZED_BASELINE %>%
+  mutate(
+    Smoking = factor(Smoking, levels = c("No", "Yes")),
+    Asthma = factor(Asthma, levels = c("No", "Yes")),
+    `Seasonal Allergies` = factor(`Seasonal Allergies`, levels = c("No", "Yes")),
+    `Animal Allergies` = factor(`Animal Allergies`, levels = c("No", "Yes")),
+    `AD Control at Baseline` = factor(`AD Control at Baseline`, levels = c("Uncontrolled", "Limited", "Good", "Complete")),
+    Race = factor(Race, levels = c("Black", "White", "Other")),
+    `Family History of AD` = factor(`Family History of AD`, levels = c("No", "Yes")),
+    `AD Persistence at Baseline` = factor(`AD Persistence at Baseline`, levels = c("No", "Yes")),
+    Income = factor(Income, levels = c("<$24,000", "$25,000-$49,999", "$50,000-$74,999", ">$75,000"))
+  )
+
+# Displaying the summarized table
+suppressMessages({
+  tbl <- tbl_summary(
+    CATEGORIZED_BASELINE,
+    include = covariates,
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd})",
+      all_stat_cols() ~ "{n} / {N} ({p}%)"
+    ),
+    by = `Food Allergy`,
+    missing = "ifany"
+  ) %>%
+  add_overall(statistic = all_stat_cols() ~ "{n} / {N} ({p}%)", header = "") %>%
+  modify_caption("**Table 1. Participant Characteristics at Enrollment Visit**") %>%
+  modify_header(label = "") %>%
+  bold_labels()
+})
+
+tbl
+
+```
+
+```{r}
+summary_data <- CATEGORIZED_BASELINE %>%
+  filter(!is.na(`Food Allergy`), !is.na(`AD Control at Baseline`)) %>%
+  group_by(`Food Allergy`, `AD Control at Baseline`) %>%
+  summarise(count = n()) %>%
+  mutate(percentage = count / sum(count) * 100)
+
+
+# Load Google Fonts
+font_add_google("Nunito", "Nunito")
+showtext_auto()
+
+# Define a color palette
+color_palette <- c("Food Allergy" = "#FFB64D", "No Food Allergy" = "#4ECDC4")  # Vibrant and playful colors
+
+ggplot(summary_data, aes(x = `AD Control at Baseline`, y = percentage, fill = `Food Allergy`)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7, alpha = 0.8) +
+  geom_text(aes(label = paste0(round(percentage), "%")),
+            position = position_dodge(width = 0.7),
+            vjust = -0.5, 
+            size = 10, 
+            color = "black") +  # Add this line to add text labels
+  labs(
+    title = "AD Control at Baseline by Food Allergy Status",
+    x = NULL,
+    y = "%",
+    fill = "Food Allergy"
+  ) +
+  scale_fill_manual(values = color_palette) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face = "bold", family = "Nunito", margin = margin(b = 20)),
+    axis.title.y = element_text(size = 18, family = "Nunito"),
+    legend.title = element_blank(),
+    legend.text = element_text(size = 18, family = "Nunito"),
+    panel.grid.major.y = element_line(color = "gray90", linetype = "dashed"),
+    panel.border = element_rect(color = "gray", fill = NA, size = 1, linetype = "solid"),
+    axis.text = element_text(color = "gray30", size = 14, family = "Nunito"),
+    axis.ticks = element_line(color = "gray30"),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.position = "bottom"
+  )
+```
+
+
+```{r}
+
+suppressMessages({
+  tbl <- tbl_summary(
+    CATEGORIZED_BASELINE,
+    include = covariates,
+    statistic = list(
+      all_continuous() ~ "{mean} ({sd})",
+      all_stat_cols() ~ "{n} / {N} ({p}%)"
+    ),
+    by = `Food Allergy (Sensitivity Analysis)`,
+    missing = "no"
+  ) %>%
+  add_overall(statistic = all_stat_cols() ~ "{n} / {N} ({p}%)", header = "") %>%
+  modify_caption("**Table 2. Sensitivity Analysis | Participant Characteristics at Enrollment Visit**") %>%
+  modify_header(label = "") %>%
+  bold_labels()
+})
+
+tbl
+```
+
+```{r}
+
+# Fit the multinomial logistic regression model for FA
+multinom_model_fa <- multinom(formula = FA ~ BASELINECONTROL, data = BASELINE)
+
+# Exponentiate the coefficients for ASTHMA
+exp_coef_fa <- exp(coef(multinom_model_fa))
+
+# View the exponentiated coefficients for ASTHMA
+exp_coef_fa
+
+# Fit the multinomial logistic regression model for ASTHMA
+multinom_model_asthma <- multinom(formula = BASELINECONTROL ~ ASTHMA, data = BASELINE)
+
+# Exponentiate the coefficients for ASTHMA
+exp_coef_asthma <- exp(coef(multinom_model_asthma))
+
+# View the exponentiated coefficients for ASTHMA
+exp_coef_asthma
+
+# Fit the multinomial logistic regression model for ANIMALALLERGIES
+multinom_model_animal_allergies <- multinom(formula = BASELINECONTROL ~ ANIMALALLERGIES, data = BASELINE)
+
+# Exponentiate the coefficients for ANIMALALLERGIES
+exp_coef_animal_allergies <- exp(coef(multinom_model_animal_allergies))
+
+# View the exponentiated coefficients for ANIMALALLERGIES
+exp_coef_animal_allergies
+
+# Fit the multinomial logistic regression model for SEASONALALLERGIES
+multinom_model_seasonal_allergies <- multinom(formula = BASELINECONTROL ~ SEASONALALLERGIES, data = BASELINE)
+
+# Exponentiate the coefficients for SEASONALALLERGIES
+exp_coef_seasonal_allergies <- exp(coef(multinom_model_seasonal_allergies))
+
+# View the exponentiated coefficients for SEASONALALLERGIES
+exp_coef_seasonal_allergies
+
+```
+
+```{r}
+# Fit the multinomial logistic regression model for FA_SENSITIVITY
+multinom_model_fa_sensitivity <- multinom(formula = BASELINECONTROL ~ FA_SENSITIVITY, data = BASELINE)
+
+# Exponentiate the coefficients for FA_SENSITIVITY
+exp_coef_fa_sensitivity <- exp(coef(multinom_model_fa_sensitivity))
+
+# View the exponentiated coefficients for FA_SENSITIVITY
+exp_coef_fa_sensitivity
+
+# Fit the multinomial logistic regression model for ASTHMA
+multinom_model_asthma <- multinom(formula = BASELINECONTROL ~ ASTHMA, data = BASELINE)
+
+# Exponentiate the coefficients for ASTHMA
+exp_coef_asthma <- exp(coef(multinom_model_asthma))
+
+# View the exponentiated coefficients for ASTHMA
+exp_coef_asthma
+
+# Fit the multinomial logistic regression model for ANIMALALLERGIES
+multinom_model_animal_allergies <- multinom(formula = BASELINECONTROL ~ ANIMALALLERGIES, data = BASELINE)
+
+# Exponentiate the coefficients for ANIMALALLERGIES
+exp_coef_animal_allergies <- exp(coef(multinom_model_animal_allergies))
+
+# View the exponentiated coefficients for ANIMALALLERGIES
+exp_coef_animal_allergies
+
+# Fit the multinomial logistic regression model for SEASONALALLERGIES
+multinom_model_seasonal_allergies <- multinom(formula = BASELINECONTROL ~ SEASONALALLERGIES, data = BASELINE)
+
+# Exponentiate the coefficients for SEASONALALLERGIES
+exp_coef_seasonal_allergies <- exp(coef(multinom_model_seasonal_allergies))
+
+# View the exponentiated coefficients for SEASONALALLERGIES
+exp_coef_seasonal_allergies
+
+```
+
+
+```{r}
+
+BASELINE$Exposure <- with(BASELINE, 
+                          ifelse(FA == 1 & ANIMALALLERGIES == 1, "Doubly Exposed",
+                          ifelse(FA == 1 & ANIMALALLERGIES == 0, "Singly Exposed to FA",
+                          ifelse(FA == 0 & ANIMALALLERGIES == 1, "Singly Exposed to CM",
+                          ifelse(FA == 0 & ANIMALALLERGIES == 0, "Doubly Unexposed",
+                          NA)))))
+
+# Set the reference level for Exposure
+BASELINE$Exposure <- relevel(factor(BASELINE$Exposure), ref = "Doubly Unexposed")
+
+# Fit multinomial logistic regression model
+FA_ANIMALALLERGIES <- multinom(BASELINECONTROL ~ Exposure, data = BASELINE)
+
+# Extract coefficients
+coefficients <- coef(FA_ANIMALALLERGIES)
+
+# Calculate odds ratios
+ORs <- exp(coefficients)
+
+# Convert ORs to a dataframe
+FA_ANIMALALLERGIES <- as.data.frame(ORs)
+FA_ANIMALALLERGIES$outcome_level <- as.numeric(row.names(coefficients))
+ 
+# Rename columns for clarity
+names(FA_ANIMALALLERGIES)[names(FA_ANIMALALLERGIES) == "ExposureDoubly Exposed"] <- "OR Doubly Exposed"
+names(FA_ANIMALALLERGIES)[names(FA_ANIMALALLERGIES) == "ExposureSingly Exposed to CM"] <- "OR Singly Exposed to CM"
+names(FA_ANIMALALLERGIES)[names(FA_ANIMALALLERGIES) == "ExposureSingly Exposed to FA"] <- "OR Singly Exposed to FA"
+
+# Calculate RERI
+OR_DoublyExposed <- FA_ANIMALALLERGIES$`OR Doubly Exposed`
+OR_SinglyExposed_CM <- FA_ANIMALALLERGIES$"OR Singly Exposed to CM"
+OR_SinglyExposed_FA <- FA_ANIMALALLERGIES$`OR Singly Exposed to FA`
+RERI <- OR_DoublyExposed - OR_SinglyExposed_FA - OR_SinglyExposed_CM + 1
+
+# Add RERI to the dataframe
+FA_ANIMALALLERGIES$RERI <- RERI
+
+# Remove the "(Intercept)" column
+FA_ANIMALALLERGIES <- FA_ANIMALALLERGIES[, !grepl("^\\(Intercept\\)", colnames(FA_ANIMALALLERGIES))]
+
+```
+
+```{r}
+# Create a binary variable for SINGLECM
+BASELINE$SINGLECM <- ifelse(BASELINE$N_OTHER_COMORBIDITIES == 1, 1, 0)
+
+# Define Exposure based on FA and SINGLECM
+BASELINE$Exposure <- with(BASELINE, 
+                          ifelse(FA == 1 & SINGLECM == 1, "Doubly Exposed",
+                          ifelse(FA == 1 & SINGLECM == 0, "Singly Exposed to FA",
+                          ifelse(FA == 0 & SINGLECM == 1, "Singly Exposed to CM",
+                          ifelse(FA == 0 & SINGLECM == 0, "Doubly Unexposed",
+                          NA)))))
+
+# Set the reference level for Exposure
+BASELINE$Exposure <- relevel(factor(BASELINE$Exposure), ref = "Doubly Unexposed")
+
+# Fit multinomial logistic regression model
+SINGLECM <- multinom(BASELINECONTROL ~ Exposure, data = BASELINE)
+
+# Extract coefficients
+coefficients <- coef(SINGLECM)
+
+# Calculate odds ratios
+ORs <- exp(coefficients)
+
+# Convert ORs to a dataframe
+SINGLECM <- as.data.frame(ORs)
+SINGLECM$outcome_level <- as.numeric(row.names(coefficients))
+SINGLECM$`CM Type` <- "Single CM"
+SINGLECM$`# CM` <- "1"
+
+# Rename columns for clarity
+names(SINGLECM)[names(SINGLECM) == "ExposureDoubly Exposed"] <- "OR Doubly Exposed"
+names(SINGLECM)[names(SINGLECM) == "ExposureSingly Exposed to CM"] <- "OR Singly Exposed to CM"
+names(SINGLECM)[names(SINGLECM) == "ExposureSingly Exposed to FA"] <- "OR Singly Exposed to FA"
+
+# Calculate RERI
+OR_DoublyExposed <- SINGLECM$`OR Doubly Exposed`
+OR_SinglyExposed_CM <- SINGLECM$"OR Singly Exposed to CM"
+OR_SinglyExposed_FA <- SINGLECM$`OR Singly Exposed to FA`
+RERI <- OR_DoublyExposed - OR_SinglyExposed_FA - OR_SinglyExposed_CM + 1
+
+# Add RERI to the dataframe
+SINGLECM$RERI <- RERI
+
+# Remove the "(Intercept)" column
+SINGLECM <- SINGLECM[, !grepl("^\\(Intercept\\)", colnames(SINGLECM))]
+
+```
+
+```{r}
+BASELINE$DOUBLECM <- ifelse(BASELINE$N_OTHER_COMORBIDITIES == 2, 1, 0)
+BASELINE$Exposure <- with(BASELINE, 
+                          ifelse(`FA` == 1 & `DOUBLECM` == 1, "Doubly Exposed",
+                          ifelse(`FA` == 1 & `DOUBLECM` == 0, "Singly Exposed to FA",
+                          ifelse(`FA` == 0 & `DOUBLECM` == 1, "Singly Exposed to CM",
+                          ifelse(`FA` == 0 & `DOUBLECM` == 0, "Doubly Unexposed",
+                          NA)))))
+BASELINE$Exposure <- relevel(factor(BASELINE$Exposure), ref = "Doubly Unexposed")
+
+DOUBLECM <- multinom(BASELINECONTROL ~ Exposure, data = BASELINE)
+coefficients <- coef(DOUBLECM)
+ORs <- exp(coefficients)
+DOUBLECM <- as.data.frame(ORs)
+DOUBLECM$outcome_level <- as.numeric(row.names(coefficients))
+DOUBLECM$`CM Type` <- "Double CM"
+DOUBLECM$`# CM` <- "2"
+
+names(DOUBLECM)[names(DOUBLECM) == "ExposureDoubly Exposed"] <- "OR Doubly Exposed"
+names(DOUBLECM)[names(DOUBLECM) == "ExposureSingly Exposed to CM"] <- "OR Singly Exposed to CM"
+names(DOUBLECM)[names(DOUBLECM) == "ExposureSingly Exposed to FA"] <- "OR Singly Exposed to FA"
+
+# Calculate RERI
+OR_DoublyExposed <- DOUBLECM$`OR Doubly Exposed`
+OR_SinglyExposed_CM <- DOUBLECM$"OR Singly Exposed to CM"
+OR_SinglyExposed_FA <- DOUBLECM$`OR Singly Exposed to FA`
+RERI <- OR_DoublyExposed - OR_SinglyExposed_FA - OR_SinglyExposed_CM + 1
+
+# Add RERI to the dataframe
+DOUBLECM$RERI <- RERI
+
+DOUBLECM <- DOUBLECM[, !grepl("^\\(Intercept\\)", colnames(DOUBLECM))]
+
+```
+
+```{r}
+BASELINE$TRIPLECM <- ifelse(BASELINE$N_OTHER_COMORBIDITIES == 3, 1, 0)
+BASELINE$Exposure <- with(BASELINE, 
+                          ifelse(`FA` == 1 & `TRIPLECM` == 1, "Doubly Exposed",
+                          ifelse(`FA` == 1 & `TRIPLECM` == 0, "Singly Exposed to FA",
+                          ifelse(`FA` == 0 & `TRIPLECM` == 1, "Singly Exposed to CM",
+                          ifelse(`FA` == 0 & `TRIPLECM` == 0, "Doubly Unexposed",
+                          NA)))))
+BASELINE$Exposure <- relevel(factor(BASELINE$Exposure), ref = "Doubly Unexposed")
+
+TRIPLECM <- multinom(BASELINECONTROL ~ Exposure, data = BASELINE)
+coefficients <- coef(TRIPLECM)
+ORs <- exp(coefficients)
+TRIPLECM <- as.data.frame(ORs)
+TRIPLECM$outcome_level <- as.numeric(row.names(coefficients))
+TRIPLECM$`CM Type` <- "Triple CM"
+TRIPLECM$`# CM` <- "3"
+
+names(TRIPLECM)[names(TRIPLECM) == "ExposureDoubly Exposed"] <- "OR Doubly Exposed"
+names(TRIPLECM)[names(TRIPLECM) == "ExposureSingly Exposed to CM"] <- "OR Singly Exposed to CM"
+names(TRIPLECM)[names(TRIPLECM) == "ExposureSingly Exposed to FA"] <- "OR Singly Exposed to FA"
+
+# Calculate RERI
+OR_DoublyExposed <- TRIPLECM$`OR Doubly Exposed`
+OR_SinglyExposed_CM <- TRIPLECM$"OR Singly Exposed to CM"
+OR_SinglyExposed_FA <- TRIPLECM$`OR Singly Exposed to FA`
+RERI <- OR_DoublyExposed - OR_SinglyExposed_FA - OR_SinglyExposed_CM + 1
+
+# Add RERI to the dataframe
+TRIPLECM$RERI <- RERI
+
+TRIPLECM <- TRIPLECM[, !grepl("^\\(Intercept\\)", colnames(TRIPLECM))]
+```
+
+```{r}
+RERI <- rbind(SINGLECM, DOUBLECM, TRIPLECM)
+RERI$Sign <- ifelse(RERI$RERI > 0, "Positive", "Negative")
+# View(RERI)
+```
+
+------------------------------------------------------------------------
+
+### Unadjusted Model
+
+```{r}
+# Ensure FA and AD control are factors (binary outcome)
+BASELINE$FA <- as.factor(BASELINE$FA)
+BASELINE$CONTROL_DJM <- as.factor(BASELINE$CONTROL_DJM)
+
+# Fit the logistic regression model with AD control as the outcome and FA as the exposure
+UA_FA <- glm(CONTROL_DJM ~ FA, data = BASELINE, family = binomial)
+
+# Extract coefficients and standard errors
+coefficients <- coef(UA_FA)[-1]  # Exclude the intercept
+standard_errors_FA <- summary(UA_FA)$coefficients[-1, "Std. Error"]
+
+# Calculate confidence intervals
+confidence_level <- 0.95
+z_score <- qnorm((1 + confidence_level) / 2)
+CI_lower_FA <- coefficients - z_score * standard_errors_FA
+CI_upper_FA <- coefficients + z_score * standard_errors_FA
+
+# Calculate odds ratios and confidence intervals for odds ratios
+odds_ratios_FA <- exp(coefficients)
+CI_lower_OR_FA <- exp(CI_lower_FA)
+CI_upper_OR_FA <- exp(CI_upper_FA)
+
+# Create dataframe with odds ratios, confidence intervals, and levels of CONTROL_DJM
+UA_FA_results <- data.frame(
+  Level = names(coefficients),
+  OR = odds_ratios_FA,
+  LCL = CI_lower_OR_FA,
+  UCL = CI_upper_OR_FA
+)
+
+# Add analysis type to dataframe
+UA_FA_results$Analysis <- "Primary"
+
+# View the results
+View(UA_FA_results)
+
+```
+
+
+
+# ```{r}
+# UA_FA <- multinom(as.factor(BASELINECONTROL) ~ FA, data = BASELINE)
+# coefficients <- coef(UA_FA)[, "FA"]
+# standard_errors_FA <- summary(UA_FA)$standard.errors[, "FA"]
+# confidence_level <- 0.95
+# z_score <- qnorm((1 + confidence_level) / 2)
+# CI_lower_FA <- coefficients - z_score * standard_errors_FA
+# CI_upper_FA <- coefficients + z_score * standard_errors_FA
+# odds_ratios_FA <- exp(coefficients)
+# CI_lower_OR_FA <- exp(CI_lower_FA)
+# CI_upper_OR_FA <- exp(CI_upper_FA)
+# 
+# AD_CONTROL_LEVELS <- c("Good AD Control", "Limited AD Control", "Uncontrolled AD")
+# 
+# # Create dataframe with odds ratios, confidence intervals, and levels of FA
+# UA_FA <- data.frame(
+#   Level = names(coefficients),
+#   AD = AD_CONTROL_LEVELS,
+#   OR = odds_ratios_FA,
+#   LCL = CI_lower_OR_FA,
+#   UCL = CI_upper_OR_FA
+# )
+# UA_FA$Analysis <- "Primary"
+# print(UA_FA)
+# ```
+```{r}
+# Ensure FA is a factor (binary outcome)
+BASELINE$Peanuts <- as.factor(BASELINE$Peanuts)
+
+# Ensure AD control is a factor (binary outcome)
+BASELINE$CONTROL_DJM <- as.factor(BASELINE$CONTROL_DJM)
+
+# Fit the logistic regression model with AD control as the outcome and peanuts as the exposure
+UA_Peanuts <- glm(CONTROL_DJM ~ as.factor(Peanuts), data = BASELINE, family = binomial)
+
+# Extract coefficients and standard errors
+coefficients <- coef(UA_Peanuts)[-1]  # Exclude the intercept
+standard_errors_FA <- summary(UA_Peanuts)$coefficients[-1, "Std. Error"]
+
+# Calculate confidence intervals
+confidence_level <- 0.95
+z_score <- qnorm((1 + confidence_level) / 2)
+CI_lower_FA <- coefficients - z_score * standard_errors_FA
+CI_upper_FA <- coefficients + z_score * standard_errors_FA
+
+# Calculate odds ratios and confidence intervals for odds ratios
+odds_ratios_FA <- exp(coefficients)
+CI_lower_OR_FA <- exp(CI_lower_FA)
+CI_upper_OR_FA <- exp(CI_upper_FA)
+
+# Create dataframe with odds ratios, confidence intervals, and levels of CONTROL_DJM
+UA_Peanuts_results <- data.frame(
+  Level = names(coefficients),
+  OR = odds_ratios_FA,
+  LCL = CI_lower_OR_FA,
+  UCL = CI_upper_OR_FA
+)
+
+# Add analysis type to dataframe
+UA_Peanuts_results$Analysis <- "Primary"
+
+# View the results
+View(UA_Peanuts_results)
+
+
+```
+
+```{r}
+# Ensure FA is a factor (binary outcome)
+BASELINE$Egg <- as.factor(BASELINE$Egg)
+
+# Ensure AD control is a factor (binary outcome)
+BASELINE$CONTROL_DJM <- as.factor(BASELINE$CONTROL_DJM)
+
+# Fit the logistic regression model with AD control as the outcome and egg allergy as the exposure
+UA_Egg <- glm(CONTROL_DJM ~ as.factor(Egg), data = BASELINE, family = binomial)
+
+# Extract coefficients and standard errors
+coefficients <- coef(UA_Egg)[-1]  # Exclude the intercept
+standard_errors_FA <- summary(UA_Egg)$coefficients[-1, "Std. Error"]
+
+# Calculate confidence intervals
+confidence_level <- 0.95
+z_score <- qnorm((1 + confidence_level) / 2)
+CI_lower_FA <- coefficients - z_score * standard_errors_FA
+CI_upper_FA <- coefficients + z_score * standard_errors_FA
+
+# Calculate odds ratios and confidence intervals for odds ratios
+odds_ratios_FA <- exp(coefficients)
+CI_lower_OR_FA <- exp(CI_lower_FA)
+CI_upper_OR_FA <- exp(CI_upper_FA)
+
+# Create dataframe with odds ratios, confidence intervals, and levels of CONTROL_DJM
+UA_Egg_results <- data.frame(
+  Level = names(coefficients),
+  OR = odds_ratios_FA,
+  LCL = CI_lower_OR_FA,
+  UCL = CI_upper_OR_FA
+)
+
+# Add analysis type to dataframe
+UA_Egg_results$Analysis <- "Primary"
+
+# View the results
+View(UA_Egg_results)
+
+
+```
+
+```{r}
+# Ensure FA is a factor (binary outcome)
+BASELINE$Milk <- as.factor(BASELINE$Milk)
+
+# Ensure AD control is a factor (binary outcome)
+BASELINE$CONTROL_DJM <- as.factor(BASELINE$CONTROL_DJM)
+
+# Fit the logistic regression model with AD control as the outcome and milk allergy as the exposure
+UA_Milk <- glm(CONTROL_DJM ~ as.factor(Milk), data = BASELINE, family = binomial)
+
+# Extract coefficients and standard errors
+coefficients <- coef(UA_Milk)[-1]  # Exclude the intercept
+standard_errors_FA <- summary(UA_Milk)$coefficients[-1, "Std. Error"]
+
+# Calculate confidence intervals
+confidence_level <- 0.95
+z_score <- qnorm((1 + confidence_level) / 2)
+CI_lower_FA <- coefficients - z_score * standard_errors_FA
+CI_upper_FA <- coefficients + z_score * standard_errors_FA
+
+# Calculate odds ratios and confidence intervals for odds ratios
+odds_ratios_FA <- exp(coefficients)
+CI_lower_OR_FA <- exp(CI_lower_FA)
+CI_upper_OR_FA <- exp(CI_upper_FA)
+
+# Create dataframe with odds ratios, confidence intervals, and levels of CONTROL_DJM
+UA_Milk_results <- data.frame(
+  Level = names(coefficients),
+  OR = odds_ratios_FA,
+  LCL = CI_lower_OR_FA,
+  UCL = CI_upper_OR_FA
+)
+
+# Add analysis type to dataframe
+UA_Milk_results$Analysis <- "Primary"
+
+# View the results
+View(UA_Milk_results)
+
+```
+
+```{r}
+# Ensure FA_SENSITIVITY is a factor (binary outcome)
+BASELINE$FA_SENSITIVITY <- as.factor(BASELINE$FA_SENSITIVITY)
+
+# Ensure AD control is a factor (binary outcome)
+BASELINE$CONTROL_DJM <- as.factor(BASELINE$CONTROL_DJM)
+
+# Fit the logistic regression model with AD control as the outcome and FA sensitivity as the exposure
+UA_SAFA <- glm(CONTROL_DJM ~ as.factor(FA_SENSITIVITY), data = BASELINE, family = binomial)
+
+# Extract coefficients and standard errors
+coefficients <- coef(UA_SAFA)[-1]  # Exclude the intercept
+standard_errors_FA <- summary(UA_SAFA)$coefficients[-1, "Std. Error"]
+
+# Calculate confidence intervals
+confidence_level <- 0.95
+z_score <- qnorm((1 + confidence_level) / 2)
+CI_lower_FA <- coefficients - z_score * standard_errors_FA
+CI_upper_FA <- coefficients + z_score * standard_errors_FA
+
+# Calculate odds ratios and confidence intervals for odds ratios
+odds_ratios_FA <- exp(coefficients)
+CI_lower_OR_FA <- exp(CI_lower_FA)
+CI_upper_OR_FA <- exp(CI_upper_FA)
+
+# Create dataframe with odds ratios, confidence intervals, and levels of CONTROL_DJM
+UA_SAFA_results <- data.frame(
+  Level = names(coefficients),
+  OR = odds_ratios_FA,
+  LCL = CI_lower_OR_FA,
+  UCL = CI_upper_OR_FA
+)
+
+# Add analysis type to dataframe
+UA_SAFA_results$Analysis <- "Sensitivity"
+
+# View the results
+View(UA_SAFA_results)
+
+```
+
+# ```{r}
+# UA_SAFA <- multinom(as.factor(BASELINECONTROL) ~ `FA_SENSITIVITY`, data = BASELINE)
+# coefficients <- coef(UA_SAFA)[, "FA_SENSITIVITY"]
+# standard_errors_FA <- summary(UA_SAFA)$standard.errors[, "FA_SENSITIVITY"]
+# confidence_level <- 0.95
+# z_score <- qnorm((1 + confidence_level) / 2)
+# CI_lower_FA <- coefficients - z_score * standard_errors_FA
+# CI_upper_FA <- coefficients + z_score * standard_errors_FA
+# odds_ratios_FA <- exp(coefficients)
+# CI_lower_OR_FA <- exp(CI_lower_FA)
+# CI_upper_OR_FA <- exp(CI_upper_FA)
+# 
+# UA_SAFA <- data.frame(
+#   Level = names(coefficients),
+#   AD = AD_CONTROL_LEVELS,
+#   OR = odds_ratios_FA,
+#   LCL = CI_lower_OR_FA,
+#   UCL = CI_upper_OR_FA
+# )
+# UA_SAFA$Analysis <- "Sensitivity"
+# print(UA_SAFA)
+# 
+# ```
+
+### Adjusted Model
+
+This code adjusted for potential confounders specified a priori, including race, FAMILYAD, sex, INCOME, and ENRAGE. Additionally, a quadratic term for ENRAGE is included (`I(ENRAGE^2)`) to capture potential non-linear effects. The inclusion of a quadratic term for ENRAGE allows the model to capture potential non-linear effects of age on ADCONTROL. This is important because the relationship between age and disease control might not be linear, meaning the effect of age could increase or decrease at different rates as age changes.
+
+```{r}
+
+# Fit the logistic regression model with AD control as the outcome and FA as the exposure, along with additional predictors
+A_FA <- glm(CONTROL_DJM ~ as.factor(FA) + as.factor(ANIMALALLERGIES) + 
+              as.factor(ASTHMA) + as.factor(SEASONALALLERGIES) + 
+              as.factor(Race) + as.factor(FAMILYAD) + as.factor(Sex) + as.factor(INCOME) + 
+              ENRAGE + I(ENRAGE^2) + as.factor(N_OTHER_COMORBIDITIES), 
+              data = BASELINE, family = binomial)
+
+# Extract coefficients and standard errors
+coefficients <- coef(A_FA)[-1]  # Exclude the intercept
+standard_errors_FA <- summary(A_FA)$coefficients[-1, "Std. Error"]
+
+# Calculate confidence intervals
+confidence_level <- 0.95
+z_score <- qnorm((1 + confidence_level) / 2)
+CI_lower_FA <- coefficients - z_score * standard_errors_FA
+CI_upper_FA <- coefficients + z_score * standard_errors_FA
+
+# Calculate odds ratios and confidence intervals for odds ratios
+odds_ratios_FA <- exp(coefficients)
+CI_lower_OR_FA <- exp(CI_lower_FA)
+CI_upper_OR_FA <- exp(CI_upper_FA)
+
+# Create dataframe with odds ratios, confidence intervals, and levels of CONTROL_DJM
+A_FA_results <- data.frame(
+  Level = names(coefficients),
+  OR = odds_ratios_FA,
+  LCL = CI_lower_OR_FA,
+  UCL = CI_upper_OR_FA
+)
+
+# Add analysis type to dataframe
+A_FA_results$Analysis <- "Primary"
+
+# View the results
+View(A_FA_results)
+
+
+```
+
+```{r}
+
+# Fit the logistic regression model with additional predictors
+A_Peanuts <- glm(CONTROL_DJM ~ as.factor(Peanuts) + as.factor(ANIMALALLERGIES) + 
+              as.factor(ASTHMA) + as.factor(SEASONALALLERGIES) + 
+              as.factor(Race) + as.factor(FAMILYAD) + as.factor(Sex) + as.factor(INCOME) + 
+              ENRAGE + I(ENRAGE^2) + as.factor(N_OTHER_COMORBIDITIES), 
+              data = BASELINE, family = binomial)
+
+# Extract coefficients and standard errors
+coefficients <- coef(A_Peanuts)[-1]  # Exclude the intercept
+standard_errors_FA <- summary(A_Peanuts)$coefficients[-1, "Std. Error"]
+
+# Calculate confidence intervals
+confidence_level <- 0.95
+z_score <- qnorm((1 + confidence_level) / 2)
+CI_lower_FA <- coefficients - z_score * standard_errors_FA
+CI_upper_FA <- coefficients + z_score * standard_errors_FA
+
+# Calculate odds ratios and confidence intervals for odds ratios
+odds_ratios_FA <- exp(coefficients)
+CI_lower_OR_FA <- exp(CI_lower_FA)
+CI_upper_OR_FA <- exp(CI_upper_FA)
+
+# Create dataframe with odds ratios, confidence intervals, and levels of BASELINECONTROL
+A_Peanuts_results <- data.frame(
+  Level = names(coefficients),
+  OR = odds_ratios_FA,
+  LCL = CI_lower_OR_FA,
+  UCL = CI_upper_OR_FA
+)
+
+# Add analysis type to dataframe
+A_Peanuts_results$Analysis <- "Primary"
+
+# View the results
+View(A_Peanuts_results)
+
+```
+
+```{r}
+A_Egg <- glm(CONTROL_DJM ~ as.factor(Egg) + as.factor(ANIMALALLERGIES) + 
+              as.factor(ASTHMA) + as.factor(SEASONALALLERGIES) + 
+              as.factor(Race) + as.factor(FAMILYAD) + as.factor(Sex) + as.factor(INCOME) + 
+              ENRAGE + I(ENRAGE^2) + as.factor(N_OTHER_COMORBIDITIES), 
+              data = BASELINE, family = binomial)
+
+# Extract coefficients and standard errors
+coefficients_1 <- coef(A_Egg)[-1]  # Exclude the intercept
+standard_errors_FA_1 <- summary(A_Egg)$coefficients_1[-1, "Std. Error"]
+
+# Calculate confidence intervals
+confidence_level <- 0.95
+z_score <- qnorm((1 + confidence_level) / 2)
+CI_lower_FA <- coefficients_1 - z_score * standard_errors_FA
+CI_upper_FA <- coefficients_1 + z_score * standard_errors_FA
+
+# Calculate odds ratios and confidence intervals for odds ratios
+odds_ratios_FA <- exp(coefficients_1)
+CI_lower_OR_FA <- exp(CI_lower_FA)
+CI_upper_OR_FA <- exp(CI_upper_FA)
+
+# Create dataframe with odds ratios, confidence intervals, and levels of BASELINECONTROL
+A_Egg_results <- data.frame(
+  Level = names(coefficients_1),
+  OR = odds_ratios_FA,
+  LCL = CI_lower_OR_FA,
+  UCL = CI_upper_OR_FA
+)
+
+# Add analysis type to dataframe
+A_Egg_results$Analysis <- "Primary"
+
+# View the results
+View(A_Egg_results)
+```
+
+
+# ```{r}
+# 
+# A_FA <- multinom(as.factor(BASELINECONTROL) ~ FA + ANIMALALLERGIES + (FA * ANIMALALLERGIES) + ASTHMA + SEASONALALLERGIES +
+#                                     as.factor(Race) + FAMILYAD + Sex + as.factor(INCOME) + ENRAGE + I(ENRAGE^2) + as.factor(N_OTHER_COMORBIDITIES), 
+#                                   data = BASELINE)
+# coefficients <- coef(A_FA)[, "FA"]
+# standard_errors_FA <- summary(A_FA)$standard.errors[, "FA"]
+# confidence_level <- 0.95
+# z_score <- qnorm((1 + confidence_level) / 2)
+# 
+# CI_lower_FA <- coefficients - z_score * standard_errors_FA
+# CI_upper_FA <- coefficients + z_score * standard_errors_FA
+# 
+# odds_ratios_FA <- exp(coefficients)
+# CI_lower_OR_FA <- exp(CI_lower_FA)
+# CI_upper_OR_FA <- exp(CI_upper_FA)
+# 
+# A_FA <- data.frame(
+#   Level = names(coefficients),
+#   AD = AD_CONTROL_LEVELS,
+#   OR = odds_ratios_FA,
+#   LCL = CI_lower_OR_FA,
+#   UCL = CI_upper_OR_FA
+# )
+# A_FA$Analysis <- "Primary"
+# print(A_FA)
+# 
+# ```
+
+```{r}
+A_Milk <- glm(CONTROL_DJM ~ as.factor(Milk) + as.factor(ANIMALALLERGIES) + 
+              as.factor(ASTHMA) + as.factor(SEASONALALLERGIES) + 
+              as.factor(Race) + as.factor(FAMILYAD) + as.factor(Sex) + as.factor(INCOME) + 
+              ENRAGE + I(ENRAGE^2) + as.factor(N_OTHER_COMORBIDITIES), 
+              data = BASELINE, family = binomial)
+
+# Extract coefficients and standard errors
+coefficients <- coef(A_Milk)[-1]  # Exclude the intercept
+standard_errors_FA <- summary(A_Milk)$coefficients[-1, "Std. Error"]
+
+# Calculate confidence intervals
+confidence_level <- 0.95
+z_score <- qnorm((1 + confidence_level) / 2)
+CI_lower_FA <- coefficients - z_score * standard_errors_FA
+CI_upper_FA <- coefficients + z_score * standard_errors_FA
+
+# Calculate odds ratios and confidence intervals for odds ratios
+odds_ratios_FA <- exp(coefficients)
+CI_lower_OR_FA <- exp(CI_lower_FA)
+CI_upper_OR_FA <- exp(CI_upper_FA)
+
+# Create dataframe with odds ratios, confidence intervals, and levels of BASELINECONTROL
+A_Milk_results <- data.frame(
+  Level = names(coefficients),
+  OR = odds_ratios_FA,
+  LCL = CI_lower_OR_FA,
+  UCL = CI_upper_OR_FA
+)
+
+# Add analysis type to dataframe
+A_Milk_results$Analysis <- "Primary"
+
+# View the results
+View(A_Milk_results)
+```
+
+```{r}
+
+# Fit the logistic regression model with additional predictors
+A_SAFA <- glm(CONTROL_DJM ~ as.factor(FA_SENSITIVITY) + as.factor(ANIMALALLERGIES) + 
+              as.factor(ASTHMA) + as.factor(SEASONALALLERGIES) + 
+              as.factor(Race) + as.factor(FAMILYAD) + as.factor(Sex) + as.factor(INCOME) + 
+              ENRAGE + I(ENRAGE^2) + as.factor(N_OTHER_COMORBIDITIES), 
+              data = BASELINE, family = binomial)
+
+# Extract coefficients and standard errors
+coefficients <- coef(A_SAFA)[-1]  # Exclude the intercept
+standard_errors_FA <- summary(A_SAFA)$coefficients[-1, "Std. Error"]
+
+# Calculate confidence intervals
+confidence_level <- 0.95
+z_score <- qnorm((1 + confidence_level) / 2)
+CI_lower_FA <- coefficients - z_score * standard_errors_FA
+CI_upper_FA <- coefficients + z_score * standard_errors_FA
+
+# Calculate odds ratios and confidence intervals for odds ratios
+odds_ratios_FA <- exp(coefficients)
+CI_lower_OR_FA <- exp(CI_lower_FA)
+CI_upper_OR_FA <- exp(CI_upper_FA)
+
+# Create dataframe with odds ratios, confidence intervals, and levels of BASELINECONTROL
+A_SAFA_results <- data.frame(
+  Level = names(coefficients),
+  OR = odds_ratios_FA,
+  LCL = CI_lower_OR_FA,
+  UCL = CI_upper_OR_FA
+)
+
+# Add analysis type to dataframe
+A_SAFA_results$Analysis <- "Sensitivity"
+
+# View the results
+View(A_SAFA_results)
+
+```
+
+# ```{r}
+# A_SAFA <- multinom(as.factor(BASELINECONTROL) ~ FA_SENSITIVITY + ANIMALALLERGIES + (FA_SENSITIVITY * ANIMALALLERGIES) + ASTHMA + SEASONALALLERGIES +
+#                                     as.factor(Race) + FAMILYAD + Sex + as.factor(INCOME) + ENRAGE + I(ENRAGE^2) + as.factor(N_OTHER_COMORBIDITIES), 
+#                                   data = BASELINE)
+# coefficients <- coef(A_SAFA)[, "FA_SENSITIVITY"]
+# standard_errors_FA <- summary(A_SAFA)$standard.errors[, "FA_SENSITIVITY"]
+# confidence_level <- 0.95
+# z_score <- qnorm((1 + confidence_level) / 2)
+# 
+# CI_lower_FA <- coefficients - z_score * standard_errors_FA
+# CI_upper_FA <- coefficients + z_score * standard_errors_FA
+# 
+# odds_ratios_FA <- exp(coefficients)
+# CI_lower_OR_FA <- exp(CI_lower_FA)
+# CI_upper_OR_FA <- exp(CI_upper_FA)
+# 
+# A_SAFA <- data.frame(
+#   Level = names(coefficients),
+#   AD = AD_CONTROL_LEVELS,
+#   OR = odds_ratios_FA,
+#   LCL = CI_lower_OR_FA,
+#   UCL = CI_upper_OR_FA
+# )
+# A_SAFA$Analysis <- "Sensitivity"
+# print(A_SAFA)
+# ```
+
+
+```{r}
+# For UNADJUSTED_BASELINE
+UNADJUSTED_BASELINE <- rbind(UA_FA_results, UA_SAFA_results)
+UNADJUSTED_BASELINE$Model <- "Unadjusted"
+UNADJUSTED_BASELINE$`Effect Estimate` <- paste(
+  round(UNADJUSTED_BASELINE$OR, 2),
+  " ( ",
+  round(UNADJUSTED_BASELINE$LCL, 2),
+  ", ",
+  round(UNADJUSTED_BASELINE$UCL, 2),
+  " )",
+  sep = ""
+)
+
+# For ADJUSTED_BASELINE
+ADJUSTED_BASELINE <- rbind(A_FA_results, A_SAFA_results)
+ADJUSTED_BASELINE$Model <- "Adjusted"
+ADJUSTED_BASELINE$`Effect Estimate` <- paste(
+  round(ADJUSTED_BASELINE$OR, 2),
+  " ( ",
+  round(ADJUSTED_BASELINE$LCL, 2),
+  ", ",
+  round(ADJUSTED_BASELINE$UCL, 2),
+  " )",
+  sep = ""
+)
+FULL_BASELINE <- rbind(ADJUSTED_BASELINE, UNADJUSTED_BASELINE)
+View(FULL_BASELINE)
+```
+
+
+# ```{r}
+# # Load Google Fonts
+# font_add_google("Nunito", "Nunito")
+# showtext_auto()
+# 
+# # Define a color palette
+# color_palette <- c("Sensitivity" = "#FF4A4A", "Primary" = "#FFB64D")  # Vibrant and playful colors
+# 
+# forest_plot <- ggplot(data = FULL_BASELINE[FULL_BASELINE$Model == "Adjusted", ], aes(x = OR, y = AD, color = Analysis)) +
+#   geom_errorbarh(aes(xmin = LCL, xmax = UCL), height = 0.2, position = position_dodge(width = 0.5), size = 1.5) + # Specify xmin and xmax aesthetics
+#   geom_point(position = position_dodge(width = 0.5), size = 5, alpha = 0.8) +
+#   
+#   geom_text(position = position_dodge(width = 0.5), vjust = -1.5, aes(label = sprintf("%.2f", OR)), size = 8, fontface = "bold", family = "Nunito") +
+#   labs(title = "Odds of AD Control Category based on FA Status",
+#        x = "Adjusted Odds Ratios",
+#        y = "Control Level") +
+#   scale_color_manual(values = color_palette) +
+#   theme_minimal(base_size = 14) +
+#   theme(
+#     legend.position = "right",
+#     plot.title = element_text(size = 24, face = "bold", hjust = 0.5, family = "Nunito"),
+#     plot.margin = margin(t = 60, r = 30, b = 60, l = 30),
+#     plot.background = element_rect(color = "black", fill = "white", size = 1, linetype = "solid"),
+#     axis.title.x = element_text(size = 18, family = "Nunito"),
+#     axis.title.y = element_blank(),
+#     legend.title = element_text(size = 20, family = "Nunito"),
+#     legend.text = element_text(size = 18, family = "Nunito"),
+#     panel.grid.major = element_line(size = 0.5, linetype = 'solid', colour = "gray90"),
+#     panel.grid.minor = element_blank(),
+#     axis.text = element_text(size = 14, face = "bold", family = "Nunito"),
+#     panel.border = element_rect(color = "gray", fill = NA, size = 1, linetype = "solid"),
+#     panel.background = element_rect(fill = "white", color = NA)
+#   ) +
+#   geom_vline(xintercept = 1, linetype = "dashed", color = "grey50", size = 1) +
+#   coord_cartesian(xlim = c(0, 3.5))  # Adjust x-axis limits
+# 
+# # Print the updated plot
+# print(forest_plot)
+# ```
+```{r}
+
+# Load Google Fonts
+font_add_google("Nunito", "Nunito")
+showtext_auto()
+
+# Define a color palette
+color_palette <- c("Primary" = "#FFB64D", "Sensitivity" = "#FF4A4A")  # Vibrant and playful colors
+
+# Calculate percentages for fa_df_1
+fa_df_1 <- as.data.frame(table(BASELINE$BASELINECONTROL[BASELINE$FA == 1]))
+fa_df_1$Analysis <- "Primary"
+fa_df_1$Percent <- round((fa_df_1$Freq / sum(fa_df_1$Freq)) * 100, 2)
+
+# Calculate percentages for fa_sensitivity_df_1
+fa_sensitivity_df_1 <- as.data.frame(table(BASELINE$BASELINECONTROL[BASELINE$FA_SENSITIVITY == 1]))
+fa_sensitivity_df_1$Analysis <- "Sensitivity"
+fa_sensitivity_df_1$Percent <- round((fa_sensitivity_df_1$Freq / sum(fa_sensitivity_df_1$Freq)) * 100, 2)
+
+# Combine all data frames
+full <- rbind(fa_df_1, fa_sensitivity_df_1)
+
+# Rename Var1 values
+full$Var1 <- factor(full$Var1, levels = c("1", "2", "3", "4"),
+                    labels = c("Complete Control", "Good Control", "Limited Control", "Uncontrolled"))
+
+ggplot(full, aes(x = Var1, y = Percent, fill = Analysis)) +
+  geom_bar(stat = "identity", position = "dodge", width = 0.7, alpha = 0.8) +
+  labs(
+    title = "AD Control Levels for Primary vs. Sensitivity Definition of Food Allergy",
+    x = "AD Control at Baseline",
+    y = "Percentage",
+    fill = "Analysis"
+  ) +
+  scale_fill_manual(values = color_palette) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 24, face = "bold", family = "Nunito", margin = margin(b = 20)),
+    axis.title = element_text(size = 18, family = "Nunito"),
+    legend.title = element_text(size = 20, family = "Nunito"),
+    legend.text = element_text(size = 18, family = "Nunito"),
+    panel.grid.major.y = element_line(color = "gray90", linetype = "dashed"),
+    panel.border = element_rect(color = "gray", fill = NA, size = 1, linetype = "solid"),
+    axis.text = element_text(color = "gray30", size = 14, family = "Nunito"),
+    axis.ticks = element_line(color = "gray30"),
+    plot.background = element_rect(fill = "white", color = NA),
+    panel.background = element_rect(fill = "white", color = NA),
+    legend.position = "bottom"
+  )
+
+```
+
+```{r}
+fa_table <- table(BASELINE$BASELINECONTROL[BASELINE$FA == 0])
+fa_sensitivity_table <- table(BASELINE$BASELINECONTROL[BASELINE$FA_SENSITIVITY == 0])
+
+# Convert tables to data frames and rename columns
+df <- data.frame(
+  BASELINECONTROL = names(fa_table),
+  FA_Count = as.vector(fa_table),
+  FA_SENSITIVITY_Count = as.vector(fa_sensitivity_table)
+)
+
+# Calculate row percentages for FA and FA_SENSITIVITY
+df <- df %>%
+  mutate(
+    FA_Percent = round(FA_Count / sum(FA_Count) * 100, 2),
+    FA_SENSITIVITY_Percent = round(FA_SENSITIVITY_Count / sum(FA_SENSITIVITY_Count) * 100, 2)
+  )
+
+# Print the resulting data frame
+print(df)
+```
+
+
+------------------------------------------------------------------------
+
+## Visualizing Missing Data {#missingdata}
+
+```{r}
+BASELINE_subset <- BASELINE[, c("FA", "FA_SENSITIVITY", "Sex", "SMOKING", "INCOME",
+                                "ENRAGE", "BASELINECONTROL","Race", "FAMILYAD", "N_OTHER_COMORBIDITIES")]
+# Calculate missing counts
+missing_counts <- sapply(BASELINE_subset, function(x) sum(is.na(x)))
+total_obs <- nrow(BASELINE_subset)
+
+# Create tibble
+missing_counts_tbl <- tibble(
+  Variable = names(missing_counts),
+  `Missing Count` = missing_counts,
+  `% Missing` = paste0(round((missing_counts / total_obs) * 100, 2), "%")
+)
+
+missing_counts_tbl <- missing_counts_tbl %>%
+  arrange(desc(`% Missing`)) 
+print(missing_counts_tbl)
+
+aggr(BASELINE_subset, col=c('navyblue', 'yellow'), numbers=TRUE, sortVars=TRUE,
+     labels=names(BASELINE_subset), cex.axis=.5, gap=0,
+     ylab=c("Histogram of missing data", "Pattern"))
+
+cat("Total Missing Percentage:", sum(as.numeric(sub("%", "", missing_counts_tbl$`% Missing`))), "%\n")
+
+```
+
+# Longitudinal Analysis
+
+```{r}
+LONGITUDINAL <- ADPEERDATA[c("PID", "VNUM", "ENR17","ENR11J", "ENR17A1", "ENR17A2", "ENR17A3", "ENR17A4", "ENR17A5", "ENR17A6", "ENR17A7", "ENR17A8", "ENR17A9", "ENR17A98", "ENR14", "ENR12", "ENR15", "SEX", "WHITE", "HISPANIC", "ASIAN", "BLACK", "NATIVE", "ENR20E", "ENR21C", "ENR22C", "ENR23", "ENR24", "enrage", "CONTROL", "CREAM", "ELIDEL", "PROT", "STEROID", "OTHERX")]
+LONGITUDINAL$HISPANIC <- ifelse(LONGITUDINAL$HISPANIC == 2, 0, LONGITUDINAL$HISPANIC)
+
+variable_rename <- c(
+  "ENR17" = "FA", "ENR11J" = "FA_RELATED_ITCH", "ENR17A1" = "Rice", "ENR17A2" = "Peanuts", "ENR17A3" = "Milk", 
+  "ENR17A4" = "Tree Nuts", "ENR17A5" = "Soy", "ENR17A6" = "Fish", "ENR17A7" = "Egg", 
+  "ENR17A8" = "Shellfish", "ENR17A9" = "Wheat", "ENR17A98" = "Other", "PID" = "PID", 
+  "VNUM" = "VNUM", "SEX" = "Sex", "WHITE" = "White", "HISPANIC" = "Hispanic", "ASIAN" = "Asian", 
+  "BLACK" = "Black", "NATIVE" = "AI/AN", "ENR20E" = "MOMAD", "ENR21C" = "DADAD", 
+  "ENR22C" = "SIBAD", "ENR23" = "SMOKING", "ENR24" = "INCOME", 
+  "enrage" = "ENRAGE", "CONTROL" = "ADCONTROL", "CREAM" = "RXCREAM.6M", 
+  "ELIDEL" = "ELIDEL.6M", "PROT" = "PROTOPIC.6M", 
+  "STEROID" = "TOPICALSTEROIDS.6M", "OTHERX" = "OTHERADRX.6M",
+  "ENR14" = "SEASONALALLERGIES", "ENR15" = "ANIMALALLERGIES", "ENR12" = "ASTHMA"
+)
+names(LONGITUDINAL) <- variable_rename[names(LONGITUDINAL)]
+
+
+LONGITUDINAL$N_OTHER_COMORBIDITIES <- ifelse(
+  (LONGITUDINAL$SEASONALALLERGIES == 1 & LONGITUDINAL$ANIMALALLERGIES == 0 & LONGITUDINAL$ASTHMA == 0) |
+  (LONGITUDINAL$SEASONALALLERGIES == 0 & LONGITUDINAL$ANIMALALLERGIES == 1 & LONGITUDINAL$ASTHMA == 0) |
+  (LONGITUDINAL$SEASONALALLERGIES == 0 & LONGITUDINAL$ANIMALALLERGIES == 0 & LONGITUDINAL$ASTHMA == 1), 1,
+  ifelse((LONGITUDINAL$SEASONALALLERGIES == 1 & LONGITUDINAL$ANIMALALLERGIES == 1 & LONGITUDINAL$ASTHMA == 0) |
+         (LONGITUDINAL$SEASONALALLERGIES == 1 & LONGITUDINAL$ANIMALALLERGIES == 0 & LONGITUDINAL$ASTHMA == 1) |
+         (LONGITUDINAL$SEASONALALLERGIES == 0 & LONGITUDINAL$ANIMALALLERGIES == 1 & LONGITUDINAL$ASTHMA == 1), 2,
+         ifelse(LONGITUDINAL$SEASONALALLERGIES == 1 & LONGITUDINAL$ANIMALALLERGIES == 1 & LONGITUDINAL$ASTHMA == 1, 3,
+                ifelse(LONGITUDINAL$SEASONALALLERGIES == 0 & LONGITUDINAL$ANIMALALLERGIES == 0 & LONGITUDINAL$ASTHMA == 0, 0, NA))))
+
+LONGITUDINAL <- LONGITUDINAL %>%
+  mutate(Race = case_when(
+    White == 1 ~ 1,
+    Black == 1 ~ 2,
+    Hispanic == 1 | Asian == 1 | `AI/AN` == 1 ~ 3,
+    TRUE ~ NA_integer_
+  ))
+
+# Calculate the sum of FA presence for each row
+LONGITUDINAL$"SUMFA" <- rowSums(LONGITUDINAL[, c("Rice", "Peanuts", "Milk", 'Tree Nuts', 'Soy', 'Fish', 'Egg', 'Shellfish', 'Wheat', 'Other')])
+
+```
+
+```{r}
+# Create a copy of LONGITUDINAL_subset
+longitudinal_dropout <- LONGITUDINAL
+longitudinal_dropout <- longitudinal_dropout[!is.na(longitudinal_dropout$VNUM), ]
+
+# Calculate dropout rates and intermittent missingness
+last_record <- longitudinal_dropout %>%
+  group_by(PID) %>%
+  summarize(
+    `Max Visit` = max(VNUM),
+  )
+
+total_patients <- nrow(last_record)
+
+dropout_rates <- last_record %>%
+  filter(!is.na(`Max Visit`)) %>%
+  mutate(dropout_indicator = ifelse(`Max Visit` == max(`Max Visit`), 0, 1)) %>%
+  group_by(`Max Visit`) %>%
+  summarize(
+    `# Dropped Out` = sum(dropout_indicator),
+    `% Cohort Dropped Out` = round((sum(dropout_indicator) / total_patients) * 100, 2)
+  ) %>%
+  ungroup() %>%
+  arrange(`Max Visit`) %>%
+  mutate(
+    `Cumulative # Dropped Out` = cumsum(`# Dropped Out`),
+    `# Active` = total_patients - `Cumulative # Dropped Out`,
+    `% Active` = round((`# Active` / total_patients) * 100, 2)
+  )
+
+
+intermittent_missingness <- longitudinal_dropout %>%
+  filter(VNUM >= 2 & VNUM <= 20) %>%
+  group_by(PID) %>%
+  mutate(
+    max_observed_rec = max(VNUM),
+    has_intermittent_missingness = any(is.na(ADCONTROL) & VNUM < max_observed_rec & !is.na(lead(ADCONTROL)))
+  ) %>%
+  ungroup() %>%
+  group_by(VNUM) %>%
+  summarize(
+    `# Intermittent Missingness` = sum(has_intermittent_missingness),
+    `% Intermittent Missingness` = round((`# Intermittent Missingness` / n()) * 100, 2)
+  )
+
+
+intermittent_missingness_2 <- longitudinal_dropout %>%
+  filter(VNUM >= 2 & VNUM <= 20) %>%
+  group_by(PID) %>%
+  mutate(
+    max_observed_rec = max(VNUM),
+    has_intermittent_missingness = any(is.na(ADCONTROL) & VNUM < max_observed_rec & !is.na(lead(ADCONTROL)))
+  ) %>%
+  ungroup() %>%
+  group_by(VNUM) %>%
+  summarize(
+    `# Intermittent Missingness` = sum(has_intermittent_missingness),
+    `% Intermittent Missingness` = round((`# Intermittent Missingness` / n()) * 100, 2)
+  )
+intermittent_missingness_2 <- intermittent_missingness_2 %>%
+  rename(`Max Visit` = VNUM)
+# Merge columns from intermittent_missingness_2 to dropout_rates
+dropout_rates <- merge(dropout_rates, intermittent_missingness_2[, c("Max Visit", "# Intermittent Missingness", "% Intermittent Missingness")], by = "Max Visit", all.x = TRUE)
+
+# Load Google Fonts
+font_add_google("Nunito", "Nunito")
+showtext_auto()
+
+# Define a color palette
+color_palette <- c("#FF4A4A", "#FFB64D", "#4ECDC4")  # Vibrant and playful colors
+
+# Plot the lollipop chart with all three metrics
+plot_combined_lollipop <- ggplot(dropout_rates) +
+  geom_segment(aes(x = `Max Visit`, xend = `Max Visit`, y = 0, yend = `% Active`, color = "Active"), size = 0.5) +
+  geom_point(aes(x = `Max Visit`, y = `% Active`, color = "Active"), size = 8) +
+  geom_segment(aes(x = `Max Visit`, xend = `Max Visit`, y = 0, yend = `% Cohort Dropped Out`, color = "Dropped Out"), size = 0.5) +
+  geom_point(aes(x = `Max Visit`, y = `% Cohort Dropped Out`, color = "Dropped Out"), size = 8) +
+  geom_segment(aes(x = `Max Visit`, xend = `Max Visit`, y = 0, yend = `% Intermittent Missingness`, color = "Intermittent Missingness"), size = 0.5) +
+  geom_point(aes(x = `Max Visit`, y = `% Intermittent Missingness`, color = "Intermittent Missingness"), size = 8) +
+  labs(x = "\nVisit #", y = "Percentage", title = "Patient Retention Metrics") +
+  scale_x_continuous(breaks = seq(1, 21, by = 1), limits = c(1, 21)) +
+  scale_y_continuous(limits = c(0, 100)) +
+  scale_color_manual(values = color_palette, labels = c("Active", "Dropped Out", "Intermittent Missingness")) +
+  theme_minimal() +
+  theme(
+    plot.background = element_rect(fill = "white", color = NA, size = 1, linetype = "solid"),
+    plot.title = element_text(family = "Nunito", size = 24, face = "bold", margin = margin(b = 15)),
+    axis.title = element_text(family = "Nunito", size = 16),
+    axis.text = element_text(family = "Nunito", size = 24),
+    legend.title = element_blank(),
+    legend.text = element_text(family = "Nunito", size = 14),
+    legend.position = "bottom",
+    plot.margin = margin(20, 20, 20, 20),
+    panel.border = element_rect(color = "gray", fill = NA, size = 1, linetype = "solid"),
+    panel.background = element_rect(fill = "white", color = NA),
+    panel.grid.major = element_line(color = "gray", size = 0.2),
+    panel.grid.minor = element_blank()
+  )
+
+# Display the plot
+plot_combined_lollipop
+```
+
+```{r}
+
+LONGITUDINAL <- LONGITUDINAL %>%
+  group_by(PID) %>%
+  complete(VNUM = min(VNUM):max(VNUM)) %>%
+  ungroup()
+
+LONGITUDINAL <- LONGITUDINAL %>%
+  group_by(PID) %>%
+  mutate(max_vnum_non_na = max(VNUM[!is.na(ADCONTROL)])) %>%
+  filter(VNUM <= max_vnum_non_na) %>%
+  ungroup()
+
+LONGITUDINAL$FAMILYAD <- ifelse(LONGITUDINAL$MOMAD == 1 | 
+                                    LONGITUDINAL$DADAD == 1 | 
+                                    LONGITUDINAL$SIBAD == 1, 
+                                    1, 0)
+
+LONGITUDINAL_subset <- subset(LONGITUDINAL, select = -c(Rice, 
+                       `Tree Nuts`, Soy, Fish, Shellfish, Wheat, Other, 
+                       White, Hispanic, Asian, Black, `AI/AN`, MOMAD, DADAD, SIBAD))
+
+LONGITUDINAL_subset <- LONGITUDINAL_subset %>%
+  group_by(PID) %>%
+  fill(
+    FA, FA_RELATED_ITCH, SEASONALALLERGIES, ASTHMA, ANIMALALLERGIES,
+    Sex, SMOKING, INCOME, ENRAGE, N_OTHER_COMORBIDITIES, Race, SUMFA, FAMILYAD, Peanuts, Egg, Milk,
+    .direction = "down"
+  ) %>%
+  ungroup()
+
+```
+
+
+```{r}
+# Calculate missing counts
+missing_counts <- sapply(LONGITUDINAL, function(x) sum(is.na(x)))
+total_obs <- nrow(LONGITUDINAL_subset)
+
+# Create tibble
+missing_counts_tbl <- tibble(
+  Variable = names(missing_counts),
+  `Missing Count` = missing_counts,
+  `% Missing` = paste0(round((missing_counts / total_obs) * 100, 2), "%")
+)
+
+missing_counts_tbl <- missing_counts_tbl %>%
+  arrange(desc(`% Missing`)) 
+print(missing_counts_tbl)
+
+aggr(LONGITUDINAL_subset, col=c('navyblue', 'yellow'), numbers=TRUE, sortVars=TRUE,
+     labels=names(LONGITUDINAL_subset), cex.axis=.5, gap=0,
+     ylab=c("Histogram of missing data", "Pattern"))
+
+```
+
+```{r}
+subsetted_subset <- LONGITUDINAL[c("PID", "VNUM", "FA", "ADCONTROL")]
+
+subsetted_subset_1_to_21 <- subset(subsetted_subset, `VNUM` %in% 1:21)
+subsetted_subset_wide <- pivot_wider(subsetted_subset_1_to_21, names_from = "VNUM", values_from = "ADCONTROL")
+
+for (col_name in names(subsetted_subset_wide[3:23])) {
+  subsetted_subset_wide[[col_name]] <- factor(subsetted_subset_wide[[col_name]], 
+                                              levels = c(1, 2, 3, 4), 
+                                              labels = c("CC", "GC", "LC", "UC"))
+}
+
+subsetted_subset_wide <- subsetted_subset_wide %>%
+  mutate(`FA` = case_when(
+    `FA` == 0 ~ "No Food Allergy",
+    `FA` == 1 ~ "Food Allergy",
+    TRUE ~ as.character(`FA`)))
+```
+
+Is there a significant difference in the proportion of CC, GC, LC, and UC based on FA status for each VNUM?
+
+```{r}
+results <- tibble(`Visit #` = character(), `chi-squared` = numeric(), `p-value` = character())
+
+for (col_name in names(subsetted_subset_wide[3:23])) {
+  chi_squared_result <- chisq.test(table(subsetted_subset_wide[[col_name]], subsetted_subset_wide$`FA`))
+  tidy_result <- tidy(chi_squared_result)
+  
+  # Round chi-squared value to 2 decimal points
+  # Format p-value in scientific notation
+  result_row <- tibble(`Visit #` = col_name,
+                       `chi-squared` = round(tidy_result$statistic[[1]], 2),
+                       `p-value` = format(tidy_result$p.value, scientific = TRUE)
+  )
+  
+  results <- bind_rows(results, result_row)
+}
+
+results
+
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(ggalluvial)
+library(yarrr)
+
+
+png("Main_Figure.png", units = "in", width = 16, height = 12, res = 300)
+subsetted_subset_wide1 <- subsetted_subset_wide |>
+  na.omit() |>
+  group_by(`FA`, `1`, `2`, `3`, `4`, `5`, `6`, `7`, `8`, `9`,
+           `10`, `11`, `12`, `13`, `14`, `15`, `16`, `17`,
+           `18`, `19`, `20`, `21`) |>
+  summarise(n = n()) |>
+  ungroup()
+
+# Define contrasting colors for CC, GC, LC, and UC
+color_palette <- c(
+  "CC" = "#D55E5E",  # Orange
+  "GC" = "#ADD8E6",  # Sky Blue
+  "LC" = "#7ED1AE",  # Green
+  "UC" = "#D8BFD8"   # Yellow
+)
+
+subsetted_subset_wide1 |>
+  ggplot(aes(axis1 = `1`, axis2 = `2`, axis3 = `3`, axis4 = `4`, axis5 = `5`,
+             axis6 = `6`, axis7 = `7`, axis8 = `8`, axis9 = `9`, axis10 = `10`,
+             axis11 = `11`, axis12 = `12`, axis13 = `13`, axis14 = `14`, axis15 = `15`,
+             axis16 = `16`, axis17 = `17`, axis18 = `18`, axis19 = `19`, axis20 = `20`, axis21 = `21`,
+             y = n)) +
+  geom_stratum(aes(fill = after_stat(stratum)), color = "black", alpha = 0.8) +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum)), angle = 0.2) +
+  theme_void() +
+  theme(legend.position = "top") +
+  scale_fill_manual(values = color_palette)
+dev.off()
+```
+
+
+```{r}
+png("Persistance_Figure.png", units = "in", width = 16, height = 12, res = 300)
+LONGITUDINAL$Persistence <- ifelse(LONGITUDINAL$ADCONTROL == 1 & 
+                                       LONGITUDINAL$RXCREAM.6M == 0 & 
+                                       LONGITUDINAL$PROTOPIC.6M == 0 & 
+                                       LONGITUDINAL$TOPICALSTEROIDS.6M == 0 & 
+                                       LONGITUDINAL$OTHERADRX.6M == 0, 
+                                       0, 1)
+
+subsetted_subset_persist <- LONGITUDINAL[c("PID", "VNUM", "FA", "Persistence")]
+
+subsetted_subset_1_to_21_persist <- subset(subsetted_subset_persist, `VNUM` %in% 1:21)
+subsetted_subset_wide_persist <- pivot_wider(subsetted_subset_1_to_21_persist, names_from = "VNUM", values_from = "Persistence")
+
+for (col_name in names(subsetted_subset_wide_persist[3:23])) {
+  subsetted_subset_wide_persist[[col_name]] <- factor(subsetted_subset_wide_persist[[col_name]], 
+                                              levels = c(0, 1), 
+                                              labels = c("NP", "P"))
+}
+
+subsetted_subset_wide_persist <- subsetted_subset_wide_persist %>%
+  mutate(`FA` = case_when(
+    `FA` == 0 ~ "No Food Allergy",
+    `FA` == 1 ~ "Food Allergy",
+    TRUE ~ as.character(`FA`)))
+
+subsetted_subset_wide_persist1 <- subsetted_subset_wide_persist |>
+  na.omit() |>
+  group_by(`FA`, `1`, `2`, `3`, `4`, `5`, `6`, `7`, `8`, `9`,
+           `10`, `11`, `12`, `13`, `14`, `15`, `16`, `17`,
+           `18`, `19`, `20`, `21`) |>
+  summarise(n = n()) |>
+  ungroup()
+
+# Define contrasting colors for CC, GC, LC, and UC
+color_palette <- c(
+  "NP" = "#D55E5E",  # Lighter Green
+  "P" = "#D8BFD8"   # Lighter Yellow
+)
+
+subsetted_subset_wide_persist1 |>
+  ggplot(aes(axis1 = `1`, axis2 = `2`, axis3 = `3`, axis4 = `4`, axis5 = `5`,
+             axis6 = `6`, axis7 = `7`, axis8 = `8`, axis9 = `9`, axis10 = `10`,
+             axis11 = `11`, axis12 = `12`, axis13 = `13`, axis14 = `14`, axis15 = `15`,
+             axis16 = `16`, axis17 = `17`, axis18 = `18`, axis19 = `19`, axis20 = `20`, axis21 = `21`,
+             y = n)) +
+  geom_stratum(aes(fill = after_stat(stratum)), color = "black", alpha = 0.8) +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum)), angle = 0.2) +
+  theme_void() +
+  theme(legend.position = "top") +
+  scale_fill_manual(values = color_palette)
+dev.off()
+```
+
+```{r}
+png("Figure1.png", units = "in", width = 16, height = 12, res = 300)
+subsetted_subset_wide1 <- subsetted_subset_wide |> na.omit() |>
+  group_by(`FA`, `1`, `2`, `3`, `4`, `5`, `6`, `7`, `8`, `9`, 
+                                  `10`, `11`, `12`, `13`, `14`, `15`, `16`, `17`,
+                                  `18`, `19`, `20`, `21`) |> 
+  summarise(n = n()) |> ungroup()
+
+
+subsetted_subset_wide1 |>
+ggplot(aes(axis1 = `1`, axis2 = `2`, axis3 = `3`, axis4 = `4`, axis5 = `5`,
+             axis6 = `6`, axis7 = `7`, axis8 = `8`, axis9 = `9`, axis10 = `10`,
+             axis11 = `11`, axis12 = `12`, axis13 = `13`, axis14 = `14`, axis15 = `15`,
+             axis16 = `16`, axis17 = `17`, axis18 = `18`, axis19 = `19`, axis20 = `20`, axis21 = `21`,              
+           y = n)) +
+  geom_alluvium(aes(color = `1`, fill = `1`), alpha = 0.5, show.legend = F) +
+  geom_stratum() +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum)), angle = 0.2) +
+  theme_void() +
+  facet_wrap(~`FA`, ncol = 1) + 
+  scale_fill_manual(values = c(yarrr::transparent("gray90", trans.val = 1), 
+                               yarrr::transparent("gray90", trans.val = 1), 
+                               yarrr::transparent("gray90", trans.val = 1), "#3182bd")) +
+  scale_color_manual(values = c(yarrr::transparent("gray90", trans.val = 1), 
+                               yarrr::transparent("gray90", trans.val = 1), 
+                               yarrr::transparent("gray90", trans.val = 1), "#3182bd")) +
+  theme(legend.position = "top")
+dev.off()
+
+```
+
+```{r}
+png("Figure2.png", units = "in", width = 16, height = 12, res = 300)
+subsetted_subset_wide1 |>
+  ggplot(aes(axis1 = `1`, axis2 = `2`, axis3 = `3`, axis4 = `4`, axis5 = `5`,
+             axis6 = `6`, axis7 = `7`, axis8 = `8`, axis9 = `9`, axis10 = `10`,
+             axis11 = `11`, axis12 = `12`, axis13 = `13`, axis14 = `14`, axis15 = `15`,
+             axis16 = `16`, axis17 = `17`, axis18 = `18`, axis19 = `19`, axis20 = `20`, axis21 = `21`,           
+           y = n)) +
+  geom_alluvium(aes(color = `1`, fill = `1`), alpha = 0.5, , show.legend = F) +
+  geom_stratum() +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum)), angle = 0.2) +
+  theme_void() +
+  facet_wrap(~`FA`, ncol = 1) + 
+  scale_fill_manual(values = c("#dd1c77", yarrr::transparent("gray90", trans.val = 1), 
+                               yarrr::transparent("gray90", trans.val = 1), 
+                               yarrr::transparent("gray90", trans.val = 1))) +
+  scale_color_manual(values = c("#dd1c77", yarrr::transparent("gray90", trans.val = 1), 
+                               yarrr::transparent("gray90", trans.val = 1), 
+                               yarrr::transparent("gray90", trans.val = 1))) +
+  theme(legend.position = "top")
+dev.off()
+
+```
+
+```{r}
+
+color_palette <- c(
+  "CC" = "#D55E5E",  # Orange
+  "GC" = "#ADD8E6",  # Sky Blue
+  "LC" = "#7ED1AE",  # Green
+  "UC" = "#D8BFD8"   # Yellow
+)
+
+subsetted_subset_wide1 |>
+  ggplot(aes(axis1 = `1`, axis2 = `2`, axis3 = `3`, axis4 = `4`, axis5 = `5`,
+             axis6 = `6`, axis7 = `7`, axis8 = `8`, axis9 = `9`, axis10 = `10`,
+             axis11 = `11`, axis12 = `12`, axis13 = `13`, axis14 = `14`, axis15 = `15`,
+             axis16 = `16`, axis17 = `17`, axis18 = `18`, axis19 = `19`, axis20 = `20`, axis21 = `21`,
+             y = n)) +
+  geom_stratum(aes(fill = after_stat(stratum)), color = "black", alpha = 0.8) +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum)), angle = 0.2) +
+  theme_void() +
+  facet_wrap(~`FA`, ncol = 1) +
+  scale_fill_manual(values = color_palette) +
+  theme(legend.position = "top")
+```
+
+
+```{r}
+png("Figure3.png", units = "in", width = 16, height = 12, res = 300)
+subsetted_subset_wide1 |>
+ggplot(aes(axis1 = `1`, axis2 = `2`, axis3 = `3`, axis4 = `4`, axis5 = `5`,
+             axis6 = `6`, axis7 = `7`, axis8 = `8`, axis9 = `9`, axis10 = `10`,
+             axis11 = `11`, axis12 = `12`, axis13 = `13`, axis14 = `14`, axis15 = `15`,
+             axis16 = `16`, axis17 = `17`, axis18 = `18`, axis19 = `19`, axis20 = `20`, axis21 = `21`,             
+           y = n)) +
+  geom_alluvium(aes(color = `1`, fill = `1`), alpha = 0.5, show.legend = F) +
+  geom_stratum() +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum)), angle = 0.2) +
+  theme_void() +
+  facet_wrap(~`FA`, ncol = 1) + 
+  scale_fill_manual(values = c(yarrr::transparent("gray90", trans.val = 1), 
+                               "#2ca25f",
+                               yarrr::transparent("gray90", trans.val = 1),
+                               yarrr::transparent("gray90", trans.val = 1))) +
+  
+  scale_color_manual(values = c(yarrr::transparent("gray90", trans.val = 1), 
+                               "#2ca25f",
+                               yarrr::transparent("gray90", trans.val = 1),
+                               yarrr::transparent("gray90", trans.val = 1))) +
+  theme(legend.position = "top")
+dev.off()
+```
+
+```{r}
+png("Figure4.png", units = "in", width = 16, height = 12, res = 300)
+subsetted_subset_wide1 |>
+ggplot(aes(axis1 = `1`, axis2 = `2`, axis3 = `3`, axis4 = `4`, axis5 = `5`,
+             axis6 = `6`, axis7 = `7`, axis8 = `8`, axis9 = `9`, axis10 = `10`,
+             axis11 = `11`, axis12 = `12`, axis13 = `13`, axis14 = `14`, axis15 = `15`,
+             axis16 = `16`, axis17 = `17`, axis18 = `18`, axis19 = `19`, axis20 = `20`, axis21 = `21`,             
+           y = n)) +
+  geom_alluvium(aes(color = `1`, fill = `1`), alpha = 0.5, show.legend = F) +
+  geom_stratum() +
+  geom_text(stat = "stratum", aes(label = after_stat(stratum)), angle = 0.2) +
+  theme_void() +
+  facet_wrap(~`FA`, ncol = 1) + 
+  scale_fill_manual(values = c(yarrr::transparent("gray90", trans.val = 1), 
+                               yarrr::transparent("gray90", trans.val = 1),
+                               "#d95f0e",
+                               yarrr::transparent("gray90", trans.val = 1))) +
+  
+  scale_color_manual(values = c(yarrr::transparent("gray90", trans.val = 1), 
+                               yarrr::transparent("gray90", trans.val = 1),
+                               "#d95f0e",
+                               yarrr::transparent("gray90", trans.val = 1))) +
+  theme(legend.position = "top")
+dev.off()
+```
+
+
+
+```{r}
+for (i in 1:10) {
+  LONGITUDINAL_subset_lagged <- LONGITUDINAL_subset %>%
+    group_by(PID) %>%
+    mutate(!!paste0("adcontrol_lag", i) := lag(ADCONTROL, i))
+}
+
+meth <- vector("list", length = ncol(LONGITUDINAL_subset))
+meth$`ENRAGE` <- "pmm"
+meth$`N_OTHER_COMORBIDITIES` <- "pmm"
+meth$`SUMFA` <- "pmm"
+meth$`FA` <- "logreg"
+meth$`FA_RELATED_ITCH` <- "logreg"
+meth$`ANIMALALLERGIES` <- "logreg"
+meth$`ASTHMA` <- "logreg"
+meth$`Milk` <- "logreg"
+meth$`Peanuts` <- "logreg"
+meth$`Egg` <- "logreg"
+meth$`SEASONALALLERGIES` <- "logreg"
+meth$`Sex` <- "logreg"
+meth$`SMOKING` <- "logreg"
+meth$`RXCREAM.6M` <- "logreg"
+meth$`ELIDEL.6M` <- "logreg"
+meth$`PROTOPIC.6M` <- "logreg"
+meth$`TOPICALSTEROIDS.6M` <- "logreg"
+meth$`OTHERADRX.6M` <- "logreg"
+meth$`FAMILYAD` <- "logreg"
+meth$`INCOME` <- "polr"
+meth$`Race` <- "polr"
+
+covariates <- c("FA", "FA_RELATED_ITCH", "Sex", "SMOKING", "INCOME", "ENRAGE", "RXCREAM.6M", "ELIDEL.6M", "PROTOPIC.6M", "TOPICALSTEROIDS.6M", "OTHERADRX.6M", "Race", "MOMAD", "DADAD", "SIBAD", "ANIMALALLERGIES", "ASTHMA", "SEASONALALLERGIES", "Peanuts", "Egg", "Milk")
+
+
+imp_init <- mice(LONGITUDINAL_subset_lagged[, !grepl("adcontrol_lag10", names(LONGITUDINAL_subset_lagged))],
+                 where = is.na(LONGITUDINAL_subset_lagged[, !grepl("adcontrol_lag10", names(LONGITUDINAL_subset_lagged))]),
+                 seed = 13579, maxit = 0)
+
+imputation_methods <- imp_init$meth
+predictor_matrix <- make.predictorMatrix(LONGITUDINAL_subset_lagged[, !grepl("adcontrol_lag10", names(LONGITUDINAL_subset_lagged))])
+
+PEER_final_imputation <- mice(
+  data = LONGITUDINAL_subset_lagged[, !grepl("adcontrol_lag10", names(LONGITUDINAL_subset_lagged))],
+  meth = imputation_methods,
+  predictorMatrix = predictor_matrix,
+  where = is.na(LONGITUDINAL_subset_lagged[, !grepl("adcontrol_lag10", names(LONGITUDINAL_subset_lagged))]),
+  m = 15,
+  seed = 12345,
+  maxit = 10,
+  nnet.MaxNWts = 5000
+)
+```
+
+```{r}
+saveRDS(PEER_final_imputation, file = "PEERfinal_imputation.RDS")
+PEER_final_imputation <- readRDS("PEERfinal_imputation.RDS")
+```
+
+```{r}
+# Extract the imputed datasets from the final_imputation object
+imputed_datasets <- mice::complete(PEER_final_imputation, "long", include = TRUE)
+imputed_datasets$Persistence <- ifelse(imputed_datasets$ADCONTROL == 1 & 
+                                       imputed_datasets$RXCREAM.6M == 0 & 
+                                       imputed_datasets$PROTOPIC.6M == 0 & 
+                                       imputed_datasets$TOPICALSTEROIDS.6M == 0 & 
+                                       imputed_datasets$OTHERADRX.6M == 0, 
+                                       0, 1)
+imputed_datasets$N_OTHER_COMORBIDITIES <- ifelse(
+  (imputed_datasets$SEASONALALLERGIES == 1 & imputed_datasets$ANIMALALLERGIES == 0 & imputed_datasets$ASTHMA == 0) |
+  (imputed_datasets$SEASONALALLERGIES == 0 & imputed_datasets$ANIMALALLERGIES == 1 & imputed_datasets$ASTHMA == 0) |
+  (imputed_datasets$SEASONALALLERGIES == 0 & imputed_datasets$ANIMALALLERGIES == 0 & imputed_datasets$ASTHMA == 1), 1,
+  ifelse((imputed_datasets$SEASONALALLERGIES == 1 & imputed_datasets$ANIMALALLERGIES == 1 & imputed_datasets$ASTHMA == 0) |
+         (imputed_datasets$SEASONALALLERGIES == 1 & imputed_datasets$ANIMALALLERGIES == 0 & imputed_datasets$ASTHMA == 1) |
+         (imputed_datasets$SEASONALALLERGIES == 0 & imputed_datasets$ANIMALALLERGIES == 1 & imputed_datasets$ASTHMA == 1), 2,
+         ifelse(imputed_datasets$SEASONALALLERGIES == 1 & imputed_datasets$ANIMALALLERGIES == 1 & imputed_datasets$ASTHMA == 1, 3,
+                ifelse(imputed_datasets$SEASONALALLERGIES == 0 & imputed_datasets$ANIMALALLERGIES == 0 & imputed_datasets$ASTHMA == 0, 0, NA)))
+)
+
+imputed_datasets <- imputed_datasets %>%
+  group_by(PID) %>%
+  mutate(BL_ADCONTROL = if_else(VNUM == 1, ADCONTROL, NA_real_)) %>%
+  fill(BL_ADCONTROL, .direction = "down")
+
+imputed_datasets <- imputed_datasets %>%
+  group_by(PID) %>%
+  mutate(BLFA = if_else(VNUM == 1, FA, NA_real_)) %>%
+  fill(BLFA, .direction = "down")
+
+imputed_datasets <- imputed_datasets %>%
+  group_by(PID) %>%
+  mutate(Peanuts = if_else(VNUM == 1, Peanuts, NA_real_)) %>%
+  fill(Peanuts, .direction = "down")
+
+imputed_datasets <- imputed_datasets %>%
+  group_by(PID) %>%
+  mutate(Milk = if_else(VNUM == 1, Milk, NA_real_)) %>%
+  fill(Milk, .direction = "down")
+
+imputed_datasets <- imputed_datasets %>%
+  group_by(PID) %>%
+  mutate(Egg = if_else(VNUM == 1, Egg, NA_real_)) %>%
+  fill(Egg, .direction = "down")
+
+imputed_datasets$FA_SENSITIVITY <- ifelse(imputed_datasets$BLFA == 1 & imputed_datasets$FA_RELATED_ITCH == 1, 1, 0)
+# imputed_datasets <- imputed_datasets[!(is.na(imputed_datasets$ADCONTROL) & imputed_datasets$VNUM != 1), ]
+imp.itt <- as.mids(imputed_datasets)
+
+imputed_datasets <- imputed_datasets %>%
+  group_by(PID, .imp) %>%
+  mutate(Observations_in_imp = n()) %>%
+  ungroup()
+```
+
+# IPW
+
+I first extracted the imputed datasets from the object called `final_imputation` and ensured that the imputed datasets were returned in a long format, where each row represented a single observation, and an additional column (`imp`) indicated the imputation number. I then created a new variable named `observednext`. Values were assigned based on a set of conditions using the `ifelse` function. These conditions verified whether the ADCONTROL value of the next observation was not missing, if the PID of the current observation matched the PID of the next observation, and if the VNUM (visit number) of the next observation was equal to the VNUM of the current observation plus 1. If all three conditions were met, `observednext` was assigned a value of 1, indicating that the subsequent observation for the same subject was observed. Conversely, if any of the conditions were not met, `observednext` was assigned a value of 0, indicating that the subsequent observation for the same subject was not observed.
+
+```{r}
+
+imputed_datasets$observednext <- ifelse(
+  !is.na(lead(imputed_datasets$ADCONTROL)) &
+    imputed_datasets$PID == lead(imputed_datasets$PID) &
+    lead(imputed_datasets$VNUM) == imputed_datasets$VNUM + 1,
+  1, 0
+)
+```
+
+I first initialized an empty list to store the IPW datasets for each imputed dataset. Inside my for loop, I defined a function to calculate IPW by fitting a logistic regression model for the numerator which only includes an intercept term. The numerator predicts the probability of being observed in the next visit without considering any predictor. I store these predicted probabilities for the numerator model into the `pred_prod_numer` column.
+
+For the denominator, I include the covariates to predict the probability of being observed based on the predictors. For the first baseline visit, I use the predicted probability from the denominator model. For non-baseline visits, I calculate the cumulative probabilities by multiplying the predicitive probabilities for the denominator for the stablized weights.
+
+```{r}
+ipw_datasets_list <- list()
+
+# Loop through each imputed dataset
+for (imp in 1:15) {
+  # Subset the imputed dataset for the current imp
+  imp_data <- imputed_datasets[imputed_datasets$.imp == imp, ]
+  data = imp_data
+  
+  # Define the function to calculate IPW for the current imputed dataset
+calc_ipw <- function(data, outcome = "observednext") {
+
+# Fit logistic regression model for the numerator
+
+model_numer <- glm(as.formula(paste(outcome, "~ 1")), data = data, family = binomial(link = "logit"))
+
+# Calculate predicted probabilities for the numerator
+
+data$pred_prob_numer <- predict(model_numer, type = "response")
+
+# Fit logistic regression model for the denominator
+model_denom <- glm(as.formula(paste(outcome, "~ as.factor(FA) + as.factor(FA_RELATED_ITCH) + as.factor(Sex) + as.factor(Race) + as.factor(INCOME) + as.factor(FAMILYAD) + as.factor(ANIMALALLERGIES) + as.factor(ASTHMA) + as.factor(SEASONALALLERGIES) + as.factor(N_OTHER_COMORBIDITIES) + as.factor(OTHERADRX.6M) + as.factor(PROTOPIC.6M) + as.factor(RXCREAM.6M) + as.factor(ELIDEL.6M) + as.factor(TOPICALSTEROIDS.6M) + as.factor(SUMFA) + ENRAGE + I(ENRAGE^2) + as.factor(SMOKING)")), data = data, family = binomial(link = "logit"))
+
+# Calculate predicted probabilities for the denominator
+
+data$pred_prob_denom <- predict(model_denom, type = "response")
+
+# Sort the data by PID and VNUM
+
+data <- data[order(data$PID, data$VNUM), ]
+
+# Calculate cumulative probabilities for pred_prob_denom within each PID
+
+data$cum_prob_denom <- ave(data$pred_prob_denom, data$PID, FUN = cumprod)
+
+# Calculate stabilized weights for observednext == 1
+
+data$weights1 <- ifelse(data$VNUM == 1,
+
+data$pred_prob_numer / data$pred_prob_denom,
+
+data$pred_prob_numer / data$cum_prob_denom)
+
+# Calculate stabilized weights for observednext == 0
+
+data$weights0 <- ifelse(data$VNUM == 1,
+
+(1 - data$pred_prob_numer) / (1 - data$pred_prob_denom),
+
+(1 - data$pred_prob_numer) / (1 - data$cum_prob_denom))
+
+# Assign weights based on observednext status
+
+data$ipw <- ifelse(data$observednext == 1,
+
+data$weights1,
+
+data$weights0)
+
+return(data)
+
+}
+
+# Calculate IPW for the current imputed dataset
+
+ipw_data <- calc_ipw(imp_data)
+
+# Add the IPW dataset to the list
+
+ipw_datasets_list[[imp]] <- ipw_data
+
+}
+```
+
+```{r}
+# Combine IPW datasets for all imputed datasets
+all_ipw_data <- do.call(rbind, ipw_datasets_list)
+
+# Subset the original dataset with .imp = 0
+original_data <- imputed_datasets[imputed_datasets$.imp == 0, ]
+
+# Add missing columns to the original dataset and fill with NA
+missing_cols <- setdiff(names(all_ipw_data), names(original_data))
+original_data[, missing_cols] <- NA
+
+# Combine the original dataset with the imputed datasets
+combined_data <- rbind(original_data, all_ipw_data)
+combined_data$ipw[combined_data$VNUM == 21] <- NA
+
+
+mice_obj <- as.mids(combined_data)
+```
+
+# all are around mild-moderate control / think ab remission vs persistence to dichotomize
+
+# time to *first* remission for survival analysis but will occur - time to second/third occurrence / think ab panel data
+
+# going to use a GEE for clustered data
+
+# there are some siblings / twins but not many - same address/same birthday
+
+```{r}
+# BLFA analysis
+gee_blfa <- with(mice_obj, geeglm(formula = Persistence ~ BLFA, family = binomial(), id = PID, corstr = "independence", na.action = na.omit))
+gee_blfa <- summary(pool(gee_blfa))
+gee_blfa$OR <- exp(gee_blfa$estimate)
+gee_blfa$std.error <- gee_blfa$std.error
+
+confidence_level <- 0.95
+z <- qnorm(1 - (1 - confidence_level) / 2)
+LCL <- gee_blfa$OR - z * gee_blfa$std.error
+UCL <- gee_blfa$OR + z * gee_blfa$std.error
+gee_blfa$LCL <- LCL
+gee_blfa$UCL <- UCL
+gee_blfa  # Print or return the summary
+
+gee_animal_allergies <- with(mice_obj, geeglm(formula = Persistence ~ ANIMALALLERGIES, family = binomial(), id = PID, corstr = "independence", na.action = na.omit))
+gee_animal_allergies <- summary(pool(gee_animal_allergies))
+gee_animal_allergies$OR <- exp(gee_animal_allergies$estimate)
+gee_animal_allergies$std.error <- gee_animal_allergies$std.error
+
+confidence_level <- 0.95
+z <- qnorm(1 - (1 - confidence_level) / 2)
+LCL <- gee_animal_allergies$OR - z * gee_animal_allergies$std.error
+UCL <- gee_animal_allergies$OR + z * gee_animal_allergies$std.error
+gee_animal_allergies$LCL <- LCL
+gee_animal_allergies$UCL <- UCL
+gee_animal_allergies  # Print or return the summary
+
+gee_asthma <- with(mice_obj, geeglm(formula = Persistence ~ ASTHMA, family = binomial(), id = PID, corstr = "independence", na.action = na.omit))
+gee_asthma <- summary(pool(gee_asthma))
+gee_asthma$OR <- exp(gee_asthma$estimate)
+gee_asthma$std.error <- gee_asthma$std.error
+
+confidence_level <- 0.95
+z <- qnorm(1 - (1 - confidence_level) / 2)
+LCL <- gee_asthma$OR - z * gee_asthma$std.error
+UCL <- gee_asthma$OR + z * gee_asthma$std.error
+gee_asthma$LCL <- LCL
+gee_asthma$UCL <- UCL
+gee_asthma  # Print or return the summary
+
+gee_seasonal_allergies <- with(mice_obj, geeglm(formula = Persistence ~ SEASONALALLERGIES, family = binomial(), id = PID, corstr = "independence", na.action = na.omit))
+gee_seasonal_allergies <- summary(pool(gee_seasonal_allergies))
+gee_seasonal_allergies$OR <- exp(gee_seasonal_allergies$estimate)
+gee_seasonal_allergies$std.error <- gee_seasonal_allergies$std.error
+
+confidence_level <- 0.95
+z <- qnorm(1 - (1 - confidence_level) / 2)
+LCL <- gee_seasonal_allergies$OR - z * gee_seasonal_allergies$std.error
+UCL <- gee_seasonal_allergies$OR + z * gee_seasonal_allergies$std.error
+gee_seasonal_allergies$LCL <- LCL
+gee_seasonal_allergies$UCL <- UCL
+gee_seasonal_allergies  # Print or return the summary
+              
+```
+
+
+```{r}
+ gee_unweighted <- with(mice_obj, geeglm(
+   formula = Persistence ~ BLFA + as.factor(Sex) + as.factor(Race) + as.factor(INCOME) + as.factor(FAMILYAD) + as.factor(ASTHMA) + as.factor(SEASONALALLERGIES) + as.factor(N_OTHER_COMORBIDITIES) + ENRAGE + I(ENRAGE^2) + as.factor(SMOKING),
+   family = binomial(link = "logit"),
+   id = PID, corstr = "independence", na.action = na.omit))
+ 
+gee_unweighted <- summary(pool(gee_unweighted))
+
+ gee_unweighted$OR <- exp(gee_unweighted$estimate)
+ gee_unweighted$std.error <- gee_unweighted$std.error
+ 
+ confidence_level <- 0.95
+ z <- qnorm(1 - (1 - confidence_level) / 2)
+ LCL <- gee_unweighted$OR - z * gee_unweighted$std.error
+ UCL <- gee_unweighted$OR + z * gee_unweighted$std.error
+  gee_unweighted$LCL <- LCL
+ gee_unweighted$UCL <- UCL
+ gee_unweighted$Model <- "Adjusted GEE"
+  gee_unweighted$Analysis <- "Primary"
+ 
+ gee_unweighted  # Print or return the summary
+
+A_FA_GEE <- gee_unweighted[gee_unweighted$term == "BLFA", c("term", "OR", "LCL", "UCL", "Model", "Analysis")]
+```
+
+```{r}
+
+# Ensure that all variables are properly defined in your mice_obj
+gee_weighted <- with(mice_obj, geeglm(
+   formula = Persistence ~ BLFA + as.factor(Sex) + as.factor(Race) + as.factor(INCOME) + 
+   as.factor(FAMILYAD) + as.factor(ASTHMA) + as.factor(SEASONALALLERGIES) + 
+   as.factor(N_OTHER_COMORBIDITIES) + ENRAGE + I(ENRAGE^2) + as.factor(SMOKING),
+   family = binomial(link = "logit"),
+   id = PID, corstr = "independence", weights = ipw, na.action = na.omit
+))
+
+# Summary should be calculated directly on the output of geeglm
+gee_summary <- summary(pool(gee_weighted))
+
+# Compute Odds Ratios and Confidence Intervals
+gee_summary$OR <- exp(gee_summary$estimate)  # Exponentiated estimates
+gee_summary$std.error <- gee_summary$std.error  # Keep the standard errors
+
+# Confidence intervals
+confidence_level <- 0.95
+z <- qnorm(1 - (1 - confidence_level) / 2)  # Z-score for the confidence level
+LCL <- gee_summary$OR * exp(-z * gee_summary$std.error)  # Lower confidence limit
+UCL <- gee_summary$OR * exp(z * gee_summary$std.error)   # Upper confidence limit
+
+# Combine results into a tidy data frame for display
+results <- data.frame(
+   Term = gee_summary$term,
+   OR = gee_summary$OR,
+   LCL = LCL,
+   UCL = UCL,
+   Model = "Adjusted GEE + IPW",
+   Analysis = "Primary"
+)
+
+# Print the results
+print(results)
+
+```
+
+```{r}
+# Fit the GEE model with only the BLFA variable
+gee_weighted_unadj <- with(mice_obj, geeglm(
+   formula = Persistence ~ BLFA,
+   family = binomial(link = "logit"),
+   id = PID, corstr = "independence", weights = ipw, na.action = na.omit
+))
+
+# Summarize the GEE model output
+gee_weighted_unadj_summary <- summary(pool(gee_weighted_unadj))
+
+# Compute Odds Ratios and Confidence Intervals
+gee_weighted_unadj_summary$OR <- exp(gee_weighted_unadj_summary$estimate)  # Exponentiate the estimates
+gee_weighted_unadj_summary$std.error <- gee_weighted_unadj_summary$std.error  # Keep the standard errors
+
+# Confidence intervals
+confidence_level <- 0.95
+z <- qnorm(1 - (1 - confidence_level) / 2)  # Z-score for the confidence level
+LCL <- gee_weighted_unadj_summary$OR * exp(-z * gee_weighted_unadj_summary$std.error)  # Lower confidence limit
+UCL <- gee_weighted_unadj_summary$OR * exp(z * gee_weighted_unadj_summary$std.error)   # Upper confidence limit
+
+# Combine results into a tidy data frame for display
+results_unadj <- data.frame(
+   Term = gee_weighted_unadj_summary$term,
+   OR = gee_weighted_unadj_summary$OR,
+   LCL = LCL,
+   UCL = UCL,
+   Model = "Unadjusted GEE + IPW",
+   Analysis = "Primary"
+)
+
+# Subset for the BLFA variable
+UA_FA_GEEIPW <- results_unadj[results_unadj$Term == "BLFA", c("Term", "OR", "LCL", "UCL", "Model", "Analysis")]
+
+# Print the results for the unadjusted model
+print(UA_FA_GEEIPW)
+```
+
+```{r}
+ sensitivity_gee_unweighted <- with(mice_obj, geeglm(
+   formula = Persistence ~ (FA_SENSITIVITY) + as.factor(Sex) + as.factor(Race) + as.factor(INCOME) + as.factor(FAMILYAD) + as.factor(ASTHMA) + as.factor(SEASONALALLERGIES) + as.factor(N_OTHER_COMORBIDITIES) + ENRAGE + I(ENRAGE^2) + as.factor(SMOKING),
+   family = binomial(link = "logit"),
+   id = PID, corstr = "independence", na.action = na.omit))
+ 
+ sensitivity_gee_unweighted <- summary(pool(sensitivity_gee_unweighted))
+
+ sensitivity_gee_unweighted$OR <- exp(sensitivity_gee_unweighted$estimate)
+ sensitivity_gee_unweighted$std.error <- sensitivity_gee_unweighted$std.error
+ 
+ confidence_level <- 0.95
+ z <- qnorm(1 - (1 - confidence_level) / 2)
+ LCL <- sensitivity_gee_unweighted$OR - z * sensitivity_gee_unweighted$std.error
+ UCL <- sensitivity_gee_unweighted$OR + z * sensitivity_gee_unweighted$std.error
+  sensitivity_gee_unweighted$LCL <- LCL
+ sensitivity_gee_unweighted$UCL <- UCL
+  sensitivity_gee_unweighted$Model <- "Adjusted GEE"
+ sensitivity_gee_unweighted$Analysis <- "Sensitivity"
+ 
+ sensitivity_gee_unweighted  # Print or return the summary
+ 
+ A_FA_GEE_SENSITIVITY <- sensitivity_gee_unweighted[sensitivity_gee_unweighted$term == "FA_SENSITIVITY", c("term", "OR", "LCL", "UCL", "Model", "Analysis")]
+```
+
+```{r}
+# Fit the GEE model with FA_SENSITIVITY and other covariates
+sensitivity_gee_weighted <- with(mice_obj, geeglm(
+   formula = Persistence ~ FA_SENSITIVITY + as.factor(Sex) + as.factor(Race) + 
+   as.factor(INCOME) + as.factor(FAMILYAD) + as.factor(ASTHMA) + 
+   as.factor(SEASONALALLERGIES) + as.factor(N_OTHER_COMORBIDITIES) + 
+   ENRAGE + I(ENRAGE^2) + as.factor(SMOKING),
+   family = binomial(link = "logit"),
+   id = PID, corstr = "independence", weights = ipw, na.action = na.omit
+))
+
+# Summarize the GEE model output
+sensitivity_gee_weighted_summary <- summary(pool(sensitivity_gee_weighted))
+
+# Compute Odds Ratios and Confidence Intervals
+sensitivity_gee_weighted_summary$OR <- exp(sensitivity_gee_weighted_summary$estimate)  # Exponentiate the estimates
+sensitivity_gee_weighted_summary$std.error <- sensitivity_gee_weighted_summary$std.error  # Keep the standard errors
+
+# Confidence intervals
+confidence_level <- 0.95
+z <- qnorm(1 - (1 - confidence_level) / 2)  # Z-score for the confidence level
+LCL <- sensitivity_gee_weighted_summary$OR * exp(-z * sensitivity_gee_weighted_summary$std.error)  # Lower confidence limit
+UCL <- sensitivity_gee_weighted_summary$OR * exp(z * sensitivity_gee_weighted_summary$std.error)   # Upper confidence limit
+
+# Combine results into a tidy data frame for display
+results_sensitivity <- data.frame(
+   Term = sensitivity_gee_weighted_summary$term,
+   OR = sensitivity_gee_weighted_summary$OR,
+   LCL = LCL,
+   UCL = UCL,
+   Model = "Adjusted GEE + IPW",
+   Analysis = "Sensitivity"
+)
+
+# Subset for the FA_SENSITIVITY variable
+A_FA_GEEIPW_SENSITIVITY <- results_sensitivity[results_sensitivity$Term == "FA_SENSITIVITY", c("Term", "OR", "LCL", "UCL", "Model", "Analysis")]
+
+# Print the results for the sensitivity model
+print(A_FA_GEEIPW_SENSITIVITY)
+```
+
+```{r}
+
+# Fit the GEE model with only FA_SENSITIVITY
+sensitivity_gee_weighted <- with(mice_obj, geeglm(
+   formula = Persistence ~ FA_SENSITIVITY,
+   family = binomial(link = "logit"),
+   id = PID, corstr = "independence", weights = ipw, na.action = na.omit
+))
+
+# Summarize the GEE model output
+sensitivity_gee_weighted_summary <- summary(pool(sensitivity_gee_weighted))
+
+# Compute Odds Ratios and Confidence Intervals
+sensitivity_gee_weighted_summary$OR <- exp(sensitivity_gee_weighted_summary$estimate)  # Exponentiate the estimates
+sensitivity_gee_weighted_summary$std.error <- sensitivity_gee_weighted_summary$std.error  # Keep the standard errors
+
+# Confidence intervals
+confidence_level <- 0.95
+z <- qnorm(1 - (1 - confidence_level) / 2)  # Z-score for the confidence level
+LCL <- sensitivity_gee_weighted_summary$OR * exp(-z * sensitivity_gee_weighted_summary$std.error)  # Lower confidence limit
+UCL <- sensitivity_gee_weighted_summary$OR * exp(z * sensitivity_gee_weighted_summary$std.error)   # Upper confidence limit
+
+# Combine results into a tidy data frame for display
+results_sensitivity <- data.frame(
+   Term = sensitivity_gee_weighted_summary$term,
+   OR = sensitivity_gee_weighted_summary$OR,
+   LCL = LCL,
+   UCL = UCL,
+   Model = "Unadjusted GEE + IPW",  # Adjusted to reflect it's unadjusted
+   Analysis = "Sensitivity"
+)
+
+# Print the results
+print(results_sensitivity)
+
+```
+
+
+```{r}
+
+# Fit the unadjusted GEE model with only FA_SENSITIVITY
+unadj_sensitivity_gee_weighted <- with(mice_obj, geeglm(
+   formula = Persistence ~ FA_SENSITIVITY,
+   family = binomial(link = "logit"),
+   id = PID, corstr = "independence", weights = ipw, na.action = na.omit
+))
+
+# Summarize the GEE model output
+unadj_sensitivity_gee_weighted_summary <- summary(pool(unadj_sensitivity_gee_weighted))
+
+# Compute Odds Ratios and Confidence Intervals
+unadj_sensitivity_gee_weighted_summary$OR <- exp(unadj_sensitivity_gee_weighted_summary$estimate)  # Exponentiate the estimates
+unadj_sensitivity_gee_weighted_summary$std.error <- unadj_sensitivity_gee_weighted_summary$std.error  # Keep the standard errors
+
+# Confidence intervals
+confidence_level <- 0.95
+z <- qnorm(1 - (1 - confidence_level) / 2)  # Z-score for the confidence level
+LCL <- unadj_sensitivity_gee_weighted_summary$OR * exp(-z * unadj_sensitivity_gee_weighted_summary$std.error)  # Lower confidence limit
+UCL <- unadj_sensitivity_gee_weighted_summary$OR * exp(z * unadj_sensitivity_gee_weighted_summary$std.error)   # Upper confidence limit
+
+# Combine results into a tidy data frame for display
+results_unadj_sensitivity <- data.frame(
+   Term = unadj_sensitivity_gee_weighted_summary$term,
+   OR = unadj_sensitivity_gee_weighted_summary$OR,
+   LCL = LCL,
+   UCL = UCL,
+   Model = "Unadjusted GEE + IPW",  # Indicating it's unadjusted
+   Analysis = "Sensitivity"
+)
+
+# Subset for the FA_SENSITIVITY variable
+UA_FA_GEEIPW_SENSITIVITY <- results_unadj_sensitivity[results_unadj_sensitivity$Term == "FA_SENSITIVITY", c("Term", "OR", "LCL", "UCL", "Model", "Analysis")]
+
+# Print the results for the unadjusted sensitivity model
+print(UA_FA_GEEIPW_SENSITIVITY)
+```
+
+
+```{r}
+# Combine the dataframes using rbind
+combined_dataframe <- rbind(A_FA_GEEIPW_SENSITIVITY, A_FA_GEE_SENSITIVITY, A_FA_GEEIPW, A_FA_GEE)
+
+# Print the combined dataframe
+print(combined_dataframe)
+combined_dataframe$term <- "FA"
+
+```
+
+```{r}
+# Fit the GEE model with Peanuts and other covariates
+gee_weighted_peanuts <- with(mice_obj, geeglm(
+   formula = Persistence ~ Peanuts + as.factor(Sex) + as.factor(Race) + 
+   as.factor(INCOME) + as.factor(FAMILYAD) + as.factor(ASTHMA) + 
+   as.factor(SEASONALALLERGIES) + as.factor(N_OTHER_COMORBIDITIES) + 
+   ENRAGE + I(ENRAGE^2) + as.factor(SMOKING),
+   family = binomial(link = "logit"),
+   id = PID, corstr = "independence", weights = ipw, na.action = na.omit
+))
+
+# Summary should be calculated directly on the output of geeglm
+gee_summary_peanuts <- summary(pool(gee_weighted_peanuts))
+
+# Compute Odds Ratios and Confidence Intervals
+gee_summary_peanuts$OR <- exp(gee_summary_peanuts$estimate)  # Exponentiated estimates
+gee_summary_peanuts$std.error <- gee_summary_peanuts$std.error  # Keep the standard errors
+
+# Confidence intervals
+confidence_level <- 0.95
+z <- qnorm(1 - (1 - confidence_level) / 2)  # Z-score for the confidence level
+LCL <- gee_summary_peanuts$OR * exp(-z * gee_summary_peanuts$std.error)  # Lower confidence limit
+UCL <- gee_summary_peanuts$OR * exp(z * gee_summary_peanuts$std.error)   # Upper confidence limit
+
+# Combine results into a tidy data frame for display
+results_peanuts <- data.frame(
+   Term = gee_summary_peanuts$term,
+   OR = gee_summary_peanuts$OR,
+   LCL = LCL,
+   UCL = UCL,
+   Model = "Adjusted GEE + IPW",
+   Analysis = "Primary"
+)
+
+# Print the results
+print(results_peanuts)
+
+
+```
+
+```{r}
+gee_unweighted_peanuts <- with(mice_obj, geeglm(
+   formula = Persistence ~ Peanuts,
+   family = binomial(link = "logit"),
+   id = PID, corstr = "independence", weights = ipw, na.action = na.omit
+))
+
+# Summary should be calculated directly on the output of geeglm
+gee_unweighted_peanuts_summary <- summary(pool(gee_unweighted_peanuts))
+
+# Compute Odds Ratios and Confidence Intervals
+gee_unweighted_peanuts_summary$OR <- exp(gee_unweighted_peanuts_summary$estimate)  # Exponentiated estimates
+gee_unweighted_peanuts_summary$std.error <- gee_unweighted_peanuts_summary$std.error  # Keep the standard errors
+
+# Confidence intervals
+confidence_level <- 0.95
+z <- qnorm(1 - (1 - confidence_level) / 2)  # Z-score for the confidence level
+LCL <- gee_unweighted_peanuts_summary$OR * exp(-z * gee_unweighted_peanuts_summary$std.error)  # Lower confidence limit
+UCL <- gee_unweighted_peanuts_summary$OR * exp(z * gee_unweighted_peanuts_summary$std.error)   # Upper confidence limit
+
+# Combine results into a tidy data frame for display
+results <- data.frame(
+   Term = gee_unweighted_peanuts_summary$term,
+   OR = gee_unweighted_peanuts_summary$OR,
+   LCL = LCL,
+   UCL = UCL,
+   Model = "Adjusted GEE + IPW",
+   Analysis = "Primary"
+)
+
+# Print the results
+print(results)
+```
+
+```{r}
+gee_unweighted_egg <- with(mice_obj, geeglm(
+   formula = Persistence ~ Egg,
+   family = binomial(link = "logit"),
+   id = PID, corstr = "independence", weights = ipw, na.action = na.omit
+))
+
+# Summary should be calculated directly on the output of geeglm
+gee_unweighted_egg_summary <- summary(pool(gee_unweighted_egg))
+
+# Compute Odds Ratios and Confidence Intervals
+gee_unweighted_egg_summary$OR <- exp(gee_unweighted_egg_summary$estimate)  # Exponentiated estimates
+gee_unweighted_egg_summary$std.error <- gee_unweighted_egg_summary$std.error  # Keep the standard errors
+
+# Confidence intervals
+confidence_level <- 0.95
+z <- qnorm(1 - (1 - confidence_level) / 2)  # Z-score for the confidence level
+LCL <- gee_unweighted_egg_summary$OR * exp(-z * gee_unweighted_egg_summary$std.error)  # Lower confidence limit
+UCL <- gee_unweighted_egg_summary$OR * exp(z * gee_unweighted_egg_summary$std.error)   # Upper confidence limit
+
+# Combine results into a tidy data frame for display
+results <- data.frame(
+   Term = gee_unweighted_egg_summary$term,
+   OR = gee_unweighted_egg_summary$OR,
+   LCL = LCL,
+   UCL = UCL,
+   Model = "Adjusted GEE + IPW",
+   Analysis = "Primary"
+)
+
+# Print the results
+print(results)
+```
+
+
+```{r}
+gee_weighted_egg <- with(mice_obj, geeglm(
+   formula = Persistence ~ Egg + as.factor(Sex) + as.factor(Race) + 
+   as.factor(INCOME) + as.factor(FAMILYAD) + as.factor(ASTHMA) + 
+   as.factor(SEASONALALLERGIES) + as.factor(N_OTHER_COMORBIDITIES) + 
+   ENRAGE + I(ENRAGE^2) + as.factor(SMOKING),
+   family = binomial(link = "logit"),
+   id = PID, corstr = "independence", weights = ipw, na.action = na.omit
+))
+
+# Summary should be calculated directly on the output of geeglm
+gee_weighted_egg_summary <- summary(pool(gee_weighted_egg))
+
+# Compute Odds Ratios and Confidence Intervals
+gee_weighted_egg_summary$OR <- exp(gee_weighted_egg_summary$estimate)  # Exponentiated estimates
+gee_weighted_egg_summary$std.error <- gee_weighted_egg_summary$std.error  # Keep the standard errors
+
+# Confidence intervals
+confidence_level <- 0.95
+z <- qnorm(1 - (1 - confidence_level) / 2)  # Z-score for the confidence level
+LCL <- gee_weighted_egg_summary$OR * exp(-z * gee_weighted_egg_summary$std.error)  # Lower confidence limit
+UCL <- gee_weighted_egg_summary$OR * exp(z * gee_weighted_egg_summary$std.error)   # Upper confidence limit
+
+# Combine results into a tidy data frame for display
+results_egg <- data.frame(
+   Term = gee_weighted_egg_summary$term,
+   OR = gee_weighted_egg_summary$OR,
+   LCL = LCL,
+   UCL = UCL,
+   Model = "Adjusted GEE + IPW",
+   Analysis = "Primary"
+)
+
+# Print the results
+print(results_egg)
+
+```
+
+```{r}
+gee_unweighted_milk <- with(mice_obj, geeglm(
+   formula = Persistence ~ Milk,
+   family = binomial(link = "logit"),
+   id = PID, corstr = "independence", weights = ipw, na.action = na.omit
+))
+
+# Summary should be calculated directly on the output of geeglm
+gee_unweighted_milk_summary <- summary(pool(gee_unweighted_milk))
+
+# Compute Odds Ratios and Confidence Intervals
+gee_unweighted_milk_summary$OR <- exp(gee_unweighted_milk_summary$estimate)  # Exponentiated estimates
+gee_unweighted_milk_summary$std.error <- gee_unweighted_milk_summary$std.error  # Keep the standard errors
+
+# Confidence intervals
+confidence_level <- 0.95
+z <- qnorm(1 - (1 - confidence_level) / 2)  # Z-score for the confidence level
+LCL <- gee_unweighted_milk_summary$OR * exp(-z * gee_unweighted_milk_summary$std.error)  # Lower confidence limit
+UCL <- gee_unweighted_milk_summary$OR * exp(z * gee_unweighted_milk_summary$std.error)   # Upper confidence limit
+
+# Combine results into a tidy data frame for display
+results <- data.frame(
+   Term = gee_unweighted_milk_summary$term,
+   OR = gee_unweighted_milk_summary$OR,
+   LCL = LCL,
+   UCL = UCL,
+   Model = "Adjusted GEE + IPW",
+   Analysis = "Primary"
+)
+
+# Print the results
+print(results)
+```
+
+```{r}
+gee_weighted_milk <- with(mice_obj, geeglm(
+   formula = Persistence ~ Milk + as.factor(Sex) + as.factor(Race) + 
+   as.factor(INCOME) + as.factor(FAMILYAD) + as.factor(ASTHMA) + 
+   as.factor(SEASONALALLERGIES) + as.factor(N_OTHER_COMORBIDITIES) + 
+   ENRAGE + I(ENRAGE^2) + as.factor(SMOKING),
+   family = binomial(link = "logit"),
+   id = PID, corstr = "independence", weights = ipw, na.action = na.omit
+))
+
+# Summary should be calculated directly on the output of geeglm
+gee_weighted_milk_summary <- summary(pool(gee_weighted_milk))
+
+# Compute Odds Ratios and Confidence Intervals
+gee_weighted_milk_summary$OR <- exp(gee_weighted_milk_summary$estimate)  # Exponentiated estimates
+gee_weighted_milk_summary$std.error <- gee_weighted_milk_summary$std.error  # Keep the standard errors
+
+# Confidence intervals
+confidence_level <- 0.95
+z <- qnorm(1 - (1 - confidence_level) / 2)  # Z-score for the confidence level
+LCL <- gee_weighted_milk_summary$OR * exp(-z * gee_weighted_milk_summary$std.error)  # Lower confidence limit
+UCL <- gee_weighted_milk_summary$OR * exp(z * gee_weighted_milk_summary$std.error)   # Upper confidence limit
+
+# Combine results into a tidy data frame for display
+results_milk <- data.frame(
+   Term = gee_weighted_milk_summary$term,
+   OR = gee_weighted_milk_summary$OR,
+   LCL = LCL,
+   UCL = UCL,
+   Model = "Adjusted GEE + IPW",
+   Analysis = "Primary"
+)
+
+# Print the results
+print(results_milk)
+```
+
